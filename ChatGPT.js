@@ -9,10 +9,10 @@
 	"inRepository": true,
 	"translatorType": 4,
 	"browserSupport": "gcsibv",
-	"lastUpdated": "2025-09-26 19:10:00"
+        "lastUpdated": "2025-09-27 02:15:00"
 }
 
-/* ChatGPT translator — v0.3.26-alpha
+/* ChatGPT translator — v0.3.27-alpha
  * Detect: /c/<id>, /share/..., /g/<project>/c/<id> → instantMessage
  * Authors: platform (ChatGPT) + human/workspace (corporate via XPath)
  * Date: store newest activity as LOCAL ISO8106 with timezone offset (e.g. 2025-09-25T20:45:49-04:00)
@@ -20,6 +20,10 @@
  * Attachment: snapshot of current page; add share page when available
  *
  * Changelog
+ * - v0.3.27-alpha: Rework the page-context fetch bridge so it binds the
+ *   event listener functions from whichever window-like object is
+ *   available, avoiding `win.addEventListener is not a function`
+ *   failures that Chrome-based connectors were still hitting.
  * - v0.3.26-alpha: Harden the page-context fetch bridge so Chromium-based
  * connectors unwrap the real window before attaching message listeners,
  * avoiding `win.addEventListener` failures.
@@ -45,7 +49,7 @@ function detectWeb(doc, url) {
 }
 
 async function doWeb(doc, url) {
-  const VERSION = 'v0.3.26-alpha';
+  const VERSION = 'v0.3.27-alpha';
   Zotero.debug(`doWeb ${VERSION}`);
 
   const item = new Zotero.Item("instantMessage");
@@ -302,8 +306,8 @@ async function fetchJSONInPage(doc, url, options) {
     throw new Error('No window available for page fetch');
   }
 
-  const eventTarget = getWindowEventTarget(win);
-  if (!eventTarget) {
+  const eventBinding = getWindowEventTarget(win);
+  if (!eventBinding) {
     throw new Error('Page window does not support event listeners');
   }
 
@@ -319,9 +323,16 @@ async function fetchJSONInPage(doc, url, options) {
     : '*';
 
   return new Promise((resolve, reject) => {
+    let timer = null;
     const cleanup = () => {
-      clearTimeout(timer);
-      eventTarget.removeEventListener('message', listener);
+      if (timer) {
+        clearTimeout(timer);
+      }
+      try {
+        eventBinding.removeEventListener('message', listener);
+      } catch (e) {
+        debugFetchBridge(`[fetchBridge] remove listener failed: ${e && e.message}`);
+      }
     };
 
     const listener = (event) => {
@@ -341,12 +352,17 @@ async function fetchJSONInPage(doc, url, options) {
       resolve({ ok: !!data.ok, status: data.status || 0, data: parsed });
     };
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       cleanup();
       reject(new Error('Timed out waiting for page fetch response'));
     }, 10000);
 
-    eventTarget.addEventListener('message', listener);
+    try {
+      eventBinding.addEventListener('message', listener);
+    } catch (e) {
+      cleanup();
+      throw e;
+    }
 
     const script = doc.createElement('script');
     script.type = 'text/javascript';
@@ -369,22 +385,57 @@ async function fetchJSONInPage(doc, url, options) {
   });
 }
 
+function debugFetchBridge(message) {
+  if (typeof Zotero !== 'undefined' && typeof Zotero.debug === 'function') {
+    Zotero.debug(message);
+  }
+}
+
 function getWindowEventTarget(win) {
-  const candidates = [
-    win,
-    win && win.wrappedJSObject,
-    win && win.window,
-    (typeof window !== 'undefined') ? window : null
-  ];
+  const seen = new Set();
+  const candidates = [];
+
+  const enqueue = (candidate) => {
+    if (!candidate) return;
+    if (seen.has(candidate)) return;
+    seen.add(candidate);
+    candidates.push(candidate);
+  };
+
+  enqueue(win);
+  enqueue(safeWindowLookup(win, 'wrappedJSObject'));
+  enqueue(safeWindowLookup(win, 'window'));
+  enqueue(safeWindowLookup(win, 'self'));
+  enqueue(safeWindowLookup(win, 'top'));
+  if (typeof window !== 'undefined') enqueue(window);
+  if (typeof globalThis !== 'undefined') enqueue(globalThis);
 
   for (const candidate of candidates) {
-    if (!candidate) continue;
-    if (typeof candidate.addEventListener === 'function' && typeof candidate.removeEventListener === 'function') {
-      return candidate;
+    try {
+      const add = candidate.addEventListener;
+      const remove = candidate.removeEventListener;
+      if (typeof add === 'function' && typeof remove === 'function') {
+        return {
+          target: candidate,
+          addEventListener: add.bind(candidate),
+          removeEventListener: remove.bind(candidate)
+        };
+      }
+    } catch (e) {
+      debugFetchBridge(`[fetchBridge] candidate rejected: ${e && e.message}`);
     }
   }
 
   return null;
+}
+
+function safeWindowLookup(win, prop) {
+  try {
+    return win && win[prop];
+  } catch (e) {
+    debugFetchBridge(`[fetchBridge] lookup ${prop} failed: ${e && e.message}`);
+    return null;
+  }
 }
 
 function sanitizeFetchOptionsForInjection(options) {
