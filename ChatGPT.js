@@ -9,7 +9,7 @@
 	"inRepository": true,
 	"translatorType": 4,
 	"browserSupport": "gcsibv",
-        "lastUpdated": "2025-09-26 19:10:00"
+	"lastUpdated": "2025-09-26 19:10:00"
 }
 
 /* ChatGPT translator — v0.3.26-alpha
@@ -21,13 +21,13 @@
  *
  * Changelog
  * - v0.3.26-alpha: Harden the page-context fetch bridge so Chromium-based
- *   connectors unwrap the real window before attaching message listeners,
- *   avoiding `win.addEventListener` failures.
+ * connectors unwrap the real window before attaching message listeners,
+ * avoiding `win.addEventListener` failures.
  * - v0.3.25-alpha: Added a resilient page-context fetch bridge so Chromium-based
- *   connectors can retrieve session tokens and conversation metadata without
- *   triggering network errors.
+ * connectors can retrieve session tokens and conversation metadata without
+ * triggering network errors.
  * - v0.3.24-alpha: Fix Scaffold fallback fetch by resolving relative API URLs
- *   against the current document before issuing the request.
+ * against the current document before issuing the request.
  * - v0.3.23-alpha: Major simplification. Removed the complex, failing script-injection
  * mechanism. The translator now uses a single, reliable `Zotero.HTTP.request`
  * method for all API calls, with corrected logic to manually pass browser
@@ -274,7 +274,7 @@ async function zoteroFetch(doc, path, options) {
       return { ok: false, status: 0, data: null };
     }
   }
-    
+  
   // Live site logic: use Zotero.HTTP.request
   try {
     const url = new URL(path, doc.location.href).href;
