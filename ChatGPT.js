@@ -8,11 +8,11 @@
 	"priority": 100,
 	"inRepository": true,
 	"translatorType": 4,
-	"browserSupport": "gcsibv",
-        "lastUpdated": "2025-09-27 02:15:00"
+        "browserSupport": "gcsibv",
+        "lastUpdated": "2025-10-02 04:15:00"
 }
 
-/* ChatGPT translator — v0.3.27-alpha
+/* ChatGPT translator — v0.3.28-alpha
  * Detect: /c/<id>, /share/..., /g/<project>/c/<id> → instantMessage
  * Authors: platform (ChatGPT) + human/workspace (corporate via XPath)
  * Date: store newest activity as LOCAL ISO8106 with timezone offset (e.g. 2025-09-25T20:45:49-04:00)
@@ -20,6 +20,10 @@
  * Attachment: snapshot of current page; add share page when available
  *
  * Changelog
+ * - v0.3.28-alpha: Bridge page-context fetch responses through both
+ *   CustomEvent dispatch and window.postMessage so Chromium-based
+ *   connectors that restrict message listeners continue to receive
+ *   responses reliably.
  * - v0.3.27-alpha: Rework the page-context fetch bridge so it binds the
  *   event listener functions from whichever window-like object is
  *   available, avoiding `win.addEventListener is not a function`
@@ -49,7 +53,7 @@ function detectWeb(doc, url) {
 }
 
 async function doWeb(doc, url) {
-  const VERSION = 'v0.3.27-alpha';
+  const VERSION = 'v0.3.28-alpha';
   Zotero.debug(`doWeb ${VERSION}`);
 
   const item = new Zotero.Item("instantMessage");
@@ -307,8 +311,9 @@ async function fetchJSONInPage(doc, url, options) {
   }
 
   const eventBinding = getWindowEventTarget(win);
-  if (!eventBinding) {
-    throw new Error('Page window does not support event listeners');
+  const docEventTarget = (doc && typeof doc.addEventListener === 'function') ? doc : null;
+  if (!eventBinding && !docEventTarget) {
+    throw new Error('Page environment does not support event listeners');
   }
 
   const channel = `zotero-chatgpt-fetch-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -317,6 +322,8 @@ async function fetchJSONInPage(doc, url, options) {
     options: sanitizeFetchOptionsForInjection(options),
     channel
   };
+
+  const responseEventName = `zotero-chatgpt-fetch-response-${channel}`;
 
   const originForPostMessage = (win.location && win.location.origin && win.location.origin !== 'null')
     ? win.location.origin
@@ -329,27 +336,50 @@ async function fetchJSONInPage(doc, url, options) {
         clearTimeout(timer);
       }
       try {
-        eventBinding.removeEventListener('message', listener);
+        if (eventBinding) {
+          eventBinding.removeEventListener('message', messageListener);
+        }
       } catch (e) {
         debugFetchBridge(`[fetchBridge] remove listener failed: ${e && e.message}`);
       }
+      if (docEventTarget) {
+        try {
+          docEventTarget.removeEventListener(responseEventName, customEventListener);
+        } catch (e) {
+          debugFetchBridge(`[fetchBridge] remove custom listener failed: ${e && e.message}`);
+        }
+      }
     };
 
-    const listener = (event) => {
-      if (!event.data || event.data.channel !== channel) {
+    const handleDetail = (detail) => {
+      cleanup();
+      if (!detail) {
+        reject(new Error('Page fetch bridge returned no data'));
         return;
       }
-      cleanup();
-      const data = event.data;
-      if (data.error) {
-        reject(new Error(data.error));
+      if (detail.error) {
+        reject(new Error(detail.error));
         return;
       }
       let parsed = null;
-      if (typeof data.text === 'string' && data.text.length) {
-        try { parsed = JSON.parse(data.text); } catch {}
+      if (typeof detail.text === 'string' && detail.text.length) {
+        try { parsed = JSON.parse(detail.text); } catch {}
       }
-      resolve({ ok: !!data.ok, status: data.status || 0, data: parsed });
+      resolve({ ok: !!detail.ok, status: detail.status || 0, data: parsed });
+    };
+
+    const messageListener = (event) => {
+      if (!event.data || event.data.channel !== channel) {
+        return;
+      }
+      handleDetail(event.data);
+    };
+
+    const customEventListener = (event) => {
+      if (!event || !event.detail || event.detail.channel !== channel) {
+        return;
+      }
+      handleDetail(event.detail);
     };
 
     timer = setTimeout(() => {
@@ -358,7 +388,12 @@ async function fetchJSONInPage(doc, url, options) {
     }, 10000);
 
     try {
-      eventBinding.addEventListener('message', listener);
+      if (eventBinding) {
+        eventBinding.addEventListener('message', messageListener);
+      }
+      if (docEventTarget) {
+        docEventTarget.addEventListener(responseEventName, customEventListener);
+      }
     } catch (e) {
       cleanup();
       throw e;
@@ -373,10 +408,22 @@ async function fetchJSONInPage(doc, url, options) {
         try {
           const res = await fetch(payload.url, payload.options);
           const text = await res.text();
-          window.postMessage({ channel: payload.channel, ok: res.ok, status: res.status, text }, targetOrigin === 'null' ? '*' : targetOrigin);
+          const detail = { channel: payload.channel, ok: res.ok, status: res.status, text };
+          if (typeof window !== 'undefined' && typeof window.postMessage === 'function') {
+            window.postMessage(detail, targetOrigin === 'null' ? '*' : targetOrigin);
+          }
+          if (typeof document !== 'undefined' && typeof document.dispatchEvent === 'function' && typeof CustomEvent !== 'undefined') {
+            document.dispatchEvent(new CustomEvent(${JSON.stringify(responseEventName)}, { detail }));
+          }
         } catch (err) {
           const message = err && err.message ? String(err.message) : String(err);
-          window.postMessage({ channel: payload.channel, error: message }, targetOrigin === 'null' ? '*' : targetOrigin);
+          const detail = { channel: payload.channel, error: message };
+          if (typeof window !== 'undefined' && typeof window.postMessage === 'function') {
+            window.postMessage(detail, targetOrigin === 'null' ? '*' : targetOrigin);
+          }
+          if (typeof document !== 'undefined' && typeof document.dispatchEvent === 'function' && typeof CustomEvent !== 'undefined') {
+            document.dispatchEvent(new CustomEvent(${JSON.stringify(responseEventName)}, { detail }));
+          }
         }
       })();
     `;
