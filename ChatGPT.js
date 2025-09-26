@@ -9,10 +9,10 @@
 	"inRepository": true,
 	"translatorType": 4,
 	"browserSupport": "gcsibv",
-	"lastUpdated": "2025-09-26 16:17:48"
+        "lastUpdated": "2025-09-26 16:24:30"
 }
 
-/* ChatGPT translator — v0.3.23-alpha
+/* ChatGPT translator — v0.3.24-alpha
  * Detect: /c/<id>, /share/..., /g/<project>/c/<id> → instantMessage
  * Authors: platform (ChatGPT) + human/workspace (corporate via XPath)
  * Date: store newest activity as LOCAL ISO8106 with timezone offset (e.g. 2025-09-25T20:45:49-04:00)
@@ -20,6 +20,8 @@
  * Attachment: snapshot of current page; add share page when available
  *
  * Changelog
+ * - v0.3.24-alpha: Fix Scaffold fallback fetch by resolving relative API URLs
+ *   against the current document before issuing the request.
  * - v0.3.23-alpha: Major simplification. Removed the complex, failing script-injection
  * mechanism. The translator now uses a single, reliable `Zotero.HTTP.request`
  * method for all API calls, with corrected logic to manually pass browser
@@ -37,7 +39,7 @@ function detectWeb(doc, url) {
 }
 
 async function doWeb(doc, url) {
-  const VERSION = 'v0.3.23-alpha';
+  const VERSION = 'v0.3.24-alpha';
   Zotero.debug(`doWeb ${VERSION}`);
 
   const item = new Zotero.Item("instantMessage");
@@ -217,7 +219,9 @@ async function zoteroFetch(doc, path, options) {
     if (typeof Zotero.HTTP === 'undefined') {
         const w = doc && doc.defaultView;
         try {
-            const res = await w.fetch(path, Object.assign({ credentials: 'include' }, options || {}));
+            const url = new URL(path, doc && doc.location ? doc.location.href : undefined).href;
+            const opts = Object.assign({ credentials: 'include' }, options || {});
+            const res = await w.fetch(url, opts);
             let data = null;
             try { data = await res.json(); } catch {}
             return { ok: res.ok, status: res.status, data };
