@@ -9,10 +9,10 @@
 	"inRepository": true,
 	"translatorType": 4,
         "browserSupport": "gcsibv",
-        "lastUpdated": "2025-10-02 04:15:00"
+        "lastUpdated": "2025-10-02 04:25:00"
 }
 
-/* ChatGPT translator — v0.3.28-alpha
+/* ChatGPT translator — v0.3.29-alpha
  * Detect: /c/<id>, /share/..., /g/<project>/c/<id> → instantMessage
  * Authors: platform (ChatGPT) + human/workspace (corporate via XPath)
  * Date: store newest activity as LOCAL ISO8106 with timezone offset (e.g. 2025-09-25T20:45:49-04:00)
@@ -20,6 +20,9 @@
  * Attachment: snapshot of current page; add share page when available
  *
  * Changelog
+ * - v0.3.29-alpha: Respect the HTTP method/body that callers pass into
+ *   `zoteroFetch` when running inside the live connector so POST/PUT
+ *   requests succeed instead of being forced to GET.
  * - v0.3.28-alpha: Bridge page-context fetch responses through both
  *   CustomEvent dispatch and window.postMessage so Chromium-based
  *   connectors that restrict message listeners continue to receive
@@ -53,7 +56,7 @@ function detectWeb(doc, url) {
 }
 
 async function doWeb(doc, url) {
-  const VERSION = 'v0.3.28-alpha';
+  const VERSION = 'v0.3.29-alpha';
   Zotero.debug(`doWeb ${VERSION}`);
 
   const item = new Zotero.Item("instantMessage");
@@ -286,14 +289,22 @@ async function zoteroFetch(doc, path, options) {
   // Live site logic: use Zotero.HTTP.request
   try {
     const url = new URL(path, doc.location.href).href;
-    const opts = options || {};
-    opts.headers = opts.headers || {};
+    const opts = Object.assign({}, options);
+    const method = (opts && opts.method ? String(opts.method) : 'GET').toUpperCase();
+    if (opts && Object.prototype.hasOwnProperty.call(opts, 'method')) {
+      delete opts.method;
+    }
+    opts.headers = Object.assign({}, opts && opts.headers);
     // Manually pass the browser's cookies for authentication
     if (doc.cookie) {
       opts.headers['Cookie'] = doc.cookie;
     }
 
-    const xhr = await Zotero.HTTP.request('GET', url, opts);
+    if (method === 'GET' && opts && Object.prototype.hasOwnProperty.call(opts, 'body')) {
+      delete opts.body;
+    }
+
+    const xhr = await Zotero.HTTP.request(method, url, opts);
     let data = null;
     try { data = JSON.parse(xhr.response); } catch {}
     return { ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data: data };
