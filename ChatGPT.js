@@ -215,40 +215,74 @@ async function getAuthInfoFromSession(doc) {
 
 // Simple, robust fetcher using Zotero.HTTP.request with cookies.
 async function zoteroFetch(doc, path, options) {
-    // Fallback for Scaffold IDE, which doesn't have Zotero.HTTP
-    if (typeof Zotero.HTTP === 'undefined') {
-        const w = doc && doc.defaultView;
-        try {
-            const url = new URL(path, doc && doc.location ? doc.location.href : undefined).href;
-            const opts = Object.assign({ credentials: 'include' }, options || {});
-            const res = await w.fetch(url, opts);
-            let data = null;
-            try { data = await res.json(); } catch {}
-            return { ok: res.ok, status: res.status, data };
-        } catch (e) {
-            Zotero.debug(`[scaffoldFetch-error] ${path}: ${e && e.message}`);
-            return { ok: false, status: 0, data: null };
-        }
-    }
-    
-    // Live site logic: use Zotero.HTTP.request
+  // Fallback for Scaffold IDE, which doesn't have Zotero.HTTP
+  if (typeof Zotero.HTTP === 'undefined') {
+    const w = doc && doc.defaultView;
     try {
-        const url = new URL(path, doc.location.href).href;
-        const opts = options || {};
-        opts.headers = opts.headers || {};
-        // Manually pass the browser's cookies for authentication
-        if (doc.cookie) {
-            opts.headers['Cookie'] = doc.cookie;
-        }
+      const url = new URL(path, doc && doc.location ? doc.location.href : undefined).href;
+      const opts = Object.assign({ credentials: 'include' }, options || {});
+      const method = (opts.method || 'GET').toUpperCase();
+      const headers = opts.headers || {};
+      const body = opts.body || null;
+      const useCredentials = opts.credentials !== 'omit';
 
-        const xhr = await Zotero.HTTP.request('GET', url, opts);
+      if (w && typeof w.fetch === 'function') {
+        const res = await w.fetch(url, opts);
         let data = null;
-        try { data = JSON.parse(xhr.response); } catch {}
-        return { ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data: data };
+        try { data = await res.json(); } catch {}
+        return { ok: res.ok, status: res.status, data };
+      }
+
+      const XHR = (w && w.XMLHttpRequest) ? w.XMLHttpRequest : (typeof XMLHttpRequest !== 'undefined' ? XMLHttpRequest : null);
+      if (!XHR) {
+        throw new Error('No fetch or XMLHttpRequest available');
+      }
+
+      const xhr = new XHR();
+      xhr.open(method, url, true);
+      if ('withCredentials' in xhr) {
+        xhr.withCredentials = useCredentials;
+      }
+      for (const [key, value] of Object.entries(headers)) {
+        xhr.setRequestHeader(key, value);
+      }
+
+      const response = await new Promise((resolve, reject) => {
+        xhr.onload = () => resolve(xhr);
+        xhr.onerror = () => reject(new Error('Network error'));
+        xhr.onabort = () => reject(new Error('Request aborted'));
+        xhr.send(body);
+      });
+
+      let data = null;
+      try { data = JSON.parse(response.responseText); } catch {}
+      const status = response.status || 0;
+      const ok = status >= 200 && status < 300;
+      return { ok, status, data };
     } catch (e) {
-        Zotero.debug(`[zoteroFetch-error] ${path}: ${e && e.message}`);
-        return { ok: false, status: 0, data: null };
+      Zotero.debug(`[scaffoldFetch-error] ${path}: ${e && e.message}`);
+      return { ok: false, status: 0, data: null };
     }
+  }
+    
+  // Live site logic: use Zotero.HTTP.request
+  try {
+    const url = new URL(path, doc.location.href).href;
+    const opts = options || {};
+    opts.headers = opts.headers || {};
+    // Manually pass the browser's cookies for authentication
+    if (doc.cookie) {
+      opts.headers['Cookie'] = doc.cookie;
+    }
+
+    const xhr = await Zotero.HTTP.request('GET', url, opts);
+    let data = null;
+    try { data = JSON.parse(xhr.response); } catch {}
+    return { ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data: data };
+  } catch (e) {
+    Zotero.debug(`[zoteroFetch-error] ${path}: ${e && e.message}`);
+    return { ok: false, status: 0, data: null };
+  }
 }
 
 
