@@ -9,10 +9,10 @@
 	"inRepository": true,
 	"translatorType": 4,
 	"browserSupport": "gcsibv",
-	"lastUpdated": "2025-09-26 19:10:00"
+        "lastUpdated": "2025-09-27 02:45:00"
 }
 
-/* ChatGPT translator — v0.3.26-alpha
+/* ChatGPT translator — v0.3.28-alpha
  * Detect: /c/<id>, /share/..., /g/<project>/c/<id> → instantMessage
  * Authors: platform (ChatGPT) + human/workspace (corporate via XPath)
  * Date: store newest activity as LOCAL ISO8106 with timezone offset (e.g. 2025-09-25T20:45:49-04:00)
@@ -20,6 +20,14 @@
  * Attachment: snapshot of current page; add share page when available
  *
  * Changelog
+ * - v0.3.28-alpha: Replace the window `postMessage` bridge with
+ *   document-scoped `CustomEvent` messaging so Chromium connectors no
+ *   longer fail when they expose window-like objects without
+ *   `addEventListener`.
+ * - v0.3.27-alpha: Rework the page-context fetch bridge so it binds the
+ *   event listener functions from whichever window-like object is
+ *   available, avoiding `win.addEventListener is not a function`
+ *   failures that Chrome-based connectors were still hitting.
  * - v0.3.26-alpha: Harden the page-context fetch bridge so Chromium-based
  * connectors unwrap the real window before attaching message listeners,
  * avoiding `win.addEventListener` failures.
@@ -45,7 +53,7 @@ function detectWeb(doc, url) {
 }
 
 async function doWeb(doc, url) {
-  const VERSION = 'v0.3.26-alpha';
+  const VERSION = 'v0.3.28-alpha';
   Zotero.debug(`doWeb ${VERSION}`);
 
   const item = new Zotero.Item("instantMessage");
@@ -297,14 +305,13 @@ async function zoteroFetch(doc, path, options) {
 /* ====== Page fetch bridge for sandboxed environments ====== */
 
 async function fetchJSONInPage(doc, url, options) {
-  const win = doc && doc.defaultView;
-  if (!win) {
-    throw new Error('No window available for page fetch');
+  if (!doc) {
+    throw new Error('No document available for page fetch');
   }
 
-  const eventTarget = getWindowEventTarget(win);
-  if (!eventTarget) {
-    throw new Error('Page window does not support event listeners');
+  const eventBinding = getDocumentEventBinding(doc);
+  if (!eventBinding) {
+    throw new Error('Document does not support event listeners');
   }
 
   const channel = `zotero-chatgpt-fetch-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -314,53 +321,78 @@ async function fetchJSONInPage(doc, url, options) {
     channel
   };
 
-  const originForPostMessage = (win.location && win.location.origin && win.location.origin !== 'null')
-    ? win.location.origin
-    : '*';
-
   return new Promise((resolve, reject) => {
+    let timer = null;
     const cleanup = () => {
-      clearTimeout(timer);
-      eventTarget.removeEventListener('message', listener);
+      if (timer) {
+        clearTimeout(timer);
+      }
+      try {
+        eventBinding.removeEventListener(channel, listener);
+      } catch (e) {
+        debugFetchBridge(`[fetchBridge] remove listener failed: ${e && e.message}`);
+      }
     };
 
     const listener = (event) => {
-      if (!event.data || event.data.channel !== channel) {
+      const detail = event && event.detail;
+      if (!detail || detail.channel !== channel) {
         return;
       }
       cleanup();
-      const data = event.data;
-      if (data.error) {
-        reject(new Error(data.error));
+      if (detail.error) {
+        reject(new Error(detail.error));
         return;
       }
       let parsed = null;
-      if (typeof data.text === 'string' && data.text.length) {
-        try { parsed = JSON.parse(data.text); } catch {}
+      if (typeof detail.text === 'string' && detail.text.length) {
+        try { parsed = JSON.parse(detail.text); } catch {}
       }
-      resolve({ ok: !!data.ok, status: data.status || 0, data: parsed });
+      resolve({ ok: !!detail.ok, status: detail.status || 0, data: parsed });
     };
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       cleanup();
       reject(new Error('Timed out waiting for page fetch response'));
     }, 10000);
 
-    eventTarget.addEventListener('message', listener);
+    try {
+      eventBinding.addEventListener(channel, listener);
+    } catch (e) {
+      cleanup();
+      throw e;
+    }
 
     const script = doc.createElement('script');
     script.type = 'text/javascript';
     script.textContent = `
       (async () => {
         const payload = ${JSON.stringify(payload)};
-        const targetOrigin = ${JSON.stringify(originForPostMessage)};
         try {
           const res = await fetch(payload.url, payload.options);
           const text = await res.text();
-          window.postMessage({ channel: payload.channel, ok: res.ok, status: res.status, text }, targetOrigin === 'null' ? '*' : targetOrigin);
+          document.dispatchEvent(
+            new CustomEvent(
+              payload.channel,
+              {
+                detail: { channel: payload.channel, ok: res.ok, status: res.status, text },
+                bubbles: true,
+                composed: true
+              }
+            )
+          );
         } catch (err) {
           const message = err && err.message ? String(err.message) : String(err);
-          window.postMessage({ channel: payload.channel, error: message }, targetOrigin === 'null' ? '*' : targetOrigin);
+          document.dispatchEvent(
+            new CustomEvent(
+              payload.channel,
+              {
+                detail: { channel: payload.channel, error: message },
+                bubbles: true,
+                composed: true
+              }
+            )
+          );
         }
       })();
     `;
@@ -369,18 +401,34 @@ async function fetchJSONInPage(doc, url, options) {
   });
 }
 
-function getWindowEventTarget(win) {
-  const candidates = [
-    win,
-    win && win.wrappedJSObject,
-    win && win.window,
-    (typeof window !== 'undefined') ? window : null
-  ];
+function debugFetchBridge(message) {
+  if (typeof Zotero !== 'undefined' && typeof Zotero.debug === 'function') {
+    Zotero.debug(message);
+  }
+}
+
+function getDocumentEventBinding(doc) {
+  const candidates = [];
+
+  if (doc) candidates.push(doc);
+  const win = doc && doc.defaultView;
+  if (win) candidates.push(win);
+  if (win && win.wrappedJSObject) candidates.push(win.wrappedJSObject);
+  if (typeof window !== 'undefined') candidates.push(window);
+  if (typeof globalThis !== 'undefined') candidates.push(globalThis);
 
   for (const candidate of candidates) {
-    if (!candidate) continue;
-    if (typeof candidate.addEventListener === 'function' && typeof candidate.removeEventListener === 'function') {
-      return candidate;
+    try {
+      const add = candidate && candidate.addEventListener;
+      const remove = candidate && candidate.removeEventListener;
+      if (typeof add === 'function' && typeof remove === 'function') {
+        return {
+          addEventListener: add.bind(candidate),
+          removeEventListener: remove.bind(candidate)
+        };
+      }
+    } catch (e) {
+      debugFetchBridge(`[fetchBridge] candidate rejected: ${e && e.message}`);
     }
   }
 
