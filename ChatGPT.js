@@ -9,10 +9,10 @@
 	"inRepository": true,
 	"translatorType": 4,
 	"browserSupport": "gcsibv",
-        "lastUpdated": "2025-09-26 16:24:30"
+        "lastUpdated": "2025-09-26 18:45:00"
 }
 
-/* ChatGPT translator — v0.3.24-alpha
+/* ChatGPT translator — v0.3.25-alpha
  * Detect: /c/<id>, /share/..., /g/<project>/c/<id> → instantMessage
  * Authors: platform (ChatGPT) + human/workspace (corporate via XPath)
  * Date: store newest activity as LOCAL ISO8106 with timezone offset (e.g. 2025-09-25T20:45:49-04:00)
@@ -20,6 +20,9 @@
  * Attachment: snapshot of current page; add share page when available
  *
  * Changelog
+ * - v0.3.25-alpha: Added a resilient page-context fetch bridge so Chromium-based
+ *   connectors can retrieve session tokens and conversation metadata without
+ *   triggering network errors.
  * - v0.3.24-alpha: Fix Scaffold fallback fetch by resolving relative API URLs
  *   against the current document before issuing the request.
  * - v0.3.23-alpha: Major simplification. Removed the complex, failing script-injection
@@ -39,7 +42,7 @@ function detectWeb(doc, url) {
 }
 
 async function doWeb(doc, url) {
-  const VERSION = 'v0.3.24-alpha';
+  const VERSION = 'v0.3.25-alpha';
   Zotero.debug(`doWeb ${VERSION}`);
 
   const item = new Zotero.Item("instantMessage");
@@ -217,27 +220,31 @@ async function getAuthInfoFromSession(doc) {
 async function zoteroFetch(doc, path, options) {
   // Fallback for Scaffold IDE, which doesn't have Zotero.HTTP
   if (typeof Zotero.HTTP === 'undefined') {
-    const w = doc && doc.defaultView;
+    const url = new URL(path, doc && doc.location ? doc.location.href : undefined).href;
+    const opts = Object.assign({ credentials: 'include' }, options || {});
+    const method = (opts.method || 'GET').toUpperCase();
+    const headers = opts.headers || {};
+    const body = opts.body || null;
+    const useCredentials = opts.credentials !== 'omit';
+
     try {
-      const url = new URL(path, doc && doc.location ? doc.location.href : undefined).href;
-      const opts = Object.assign({ credentials: 'include' }, options || {});
-      const method = (opts.method || 'GET').toUpperCase();
-      const headers = opts.headers || {};
-      const body = opts.body || null;
-      const useCredentials = opts.credentials !== 'omit';
+      return await fetchJSONInPage(doc, url, {
+        method,
+        headers,
+        body,
+        credentials: useCredentials ? 'include' : 'omit'
+      });
+    } catch (e) {
+      Zotero.debug(`[scaffoldFetch-error] ${path}: ${e && e.message}`);
+    }
 
-      if (w && typeof w.fetch === 'function') {
-        const res = await w.fetch(url, opts);
-        let data = null;
-        try { data = await res.json(); } catch {}
-        return { ok: res.ok, status: res.status, data };
-      }
+    const w = doc && doc.defaultView;
+    const XHR = (w && w.XMLHttpRequest) ? w.XMLHttpRequest : (typeof XMLHttpRequest !== 'undefined' ? XMLHttpRequest : null);
+    if (!XHR) {
+      return { ok: false, status: 0, data: null };
+    }
 
-      const XHR = (w && w.XMLHttpRequest) ? w.XMLHttpRequest : (typeof XMLHttpRequest !== 'undefined' ? XMLHttpRequest : null);
-      if (!XHR) {
-        throw new Error('No fetch or XMLHttpRequest available');
-      }
-
+    try {
       const xhr = new XHR();
       xhr.open(method, url, true);
       if ('withCredentials' in xhr) {
@@ -260,7 +267,7 @@ async function zoteroFetch(doc, path, options) {
       const ok = status >= 200 && status < 300;
       return { ok, status, data };
     } catch (e) {
-      Zotero.debug(`[scaffoldFetch-error] ${path}: ${e && e.message}`);
+      Zotero.debug(`[scaffoldFetch-xhr-error] ${path}: ${e && e.message}`);
       return { ok: false, status: 0, data: null };
     }
   }
@@ -284,7 +291,89 @@ async function zoteroFetch(doc, path, options) {
     return { ok: false, status: 0, data: null };
   }
 }
+/* ====== Page fetch bridge for sandboxed environments ====== */
 
+async function fetchJSONInPage(doc, url, options) {
+  const win = doc && doc.defaultView;
+  if (!win) {
+    throw new Error('No window available for page fetch');
+  }
+
+  const channel = `zotero-chatgpt-fetch-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const payload = {
+    url,
+    options: sanitizeFetchOptionsForInjection(options),
+    channel
+  };
+
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      win.removeEventListener('message', listener);
+    };
+
+    const listener = (event) => {
+      if (event.source !== win || !event.data || event.data.channel !== channel) {
+        return;
+      }
+      cleanup();
+      const data = event.data;
+      if (data.error) {
+        reject(new Error(data.error));
+        return;
+      }
+      let parsed = null;
+      if (typeof data.text === 'string' && data.text.length) {
+        try { parsed = JSON.parse(data.text); } catch {}
+      }
+      resolve({ ok: !!data.ok, status: data.status || 0, data: parsed });
+    };
+
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('Timed out waiting for page fetch response'));
+    }, 10000);
+
+    win.addEventListener('message', listener);
+
+    const script = doc.createElement('script');
+    script.type = 'text/javascript';
+    script.textContent = `
+      (async () => {
+        const payload = ${JSON.stringify(payload)};
+        try {
+          const res = await fetch(payload.url, payload.options);
+          const text = await res.text();
+          window.postMessage({ channel: payload.channel, ok: res.ok, status: res.status, text }, window.origin);
+        } catch (err) {
+          const message = err && err.message ? String(err.message) : String(err);
+          window.postMessage({ channel: payload.channel, error: message }, window.origin);
+        }
+      })();
+    `;
+    (doc.documentElement || doc).appendChild(script);
+    script.remove();
+  });
+}
+
+function sanitizeFetchOptionsForInjection(options) {
+  const out = {
+    method: options && options.method ? String(options.method).toUpperCase() : 'GET',
+    credentials: options && options.credentials ? options.credentials : 'include'
+  };
+  if (options && options.headers && typeof options.headers === 'object') {
+    out.headers = {};
+    for (const [key, value] of Object.entries(options.headers)) {
+      if (value != null) {
+        out.headers[String(key)] = String(value);
+      }
+    }
+  }
+  if (options && options.body != null) {
+    out.body = options.body;
+  }
+  return out;
+}
 
 /* ====== time extraction (now returns LOCAL timestamp with offset) ====== */
 
