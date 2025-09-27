@@ -242,12 +242,15 @@ async function zoteroFetch(doc, path, options) {
     const useCredentials = opts.credentials !== 'omit';
 
     try {
-      return await fetchJSONInPage(doc, url, {
+      const bridged = await fetchJSONInPage(doc, url, {
         method,
         headers,
         body,
         credentials: useCredentials ? 'include' : 'omit'
       });
+      if (bridged) {
+        return bridged;
+      }
     } catch (e) {
       Zotero.debug(`[scaffoldFetch-error] ${path}: ${e && e.message}`);
     }
@@ -328,13 +331,16 @@ async function fetchJSONInPage(doc, url, options) {
   }
 
   const channel = `zotero-chatgpt-fetch-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const requestEventName = 'zotero-chatgpt-fetch-request';
+  const responseEventName = `zotero-chatgpt-fetch-response-${channel}`;
+  const fallbackResponseEventName = 'zotero-chatgpt-fetch-response';
   const payload = {
     url,
-    options: sanitizeFetchOptionsForInjection(options),
-    channel
+    options: sanitizeFetchOptionsForBridge(options),
+    channel,
+    responseEventName,
+    fallbackResponseEventName
   };
-
-  const responseEventName = `zotero-chatgpt-fetch-response-${channel}`;
 
   const originForPostMessage = (win.location && win.location.origin && win.location.origin !== 'null')
     ? win.location.origin
@@ -354,10 +360,12 @@ async function fetchJSONInPage(doc, url, options) {
         debugFetchBridge(`[fetchBridge] remove listener failed: ${e && e.message}`);
       }
       if (docEventTarget) {
-        try {
-          docEventTarget.removeEventListener(responseEventName, customEventListener);
-        } catch (e) {
-          debugFetchBridge(`[fetchBridge] remove custom listener failed: ${e && e.message}`);
+        for (const name of [responseEventName, fallbackResponseEventName]) {
+          try {
+            docEventTarget.removeEventListener(name, customEventListener);
+          } catch (e) {
+            debugFetchBridge(`[fetchBridge] remove custom listener failed: ${e && e.message}`);
+          }
         }
       }
     };
@@ -383,11 +391,17 @@ async function fetchJSONInPage(doc, url, options) {
       if (!event.data || event.data.channel !== channel) {
         return;
       }
+      if (event.data.type && event.data.type !== responseEventName && event.data.type !== fallbackResponseEventName) {
+        return;
+      }
       handleDetail(event.data);
     };
 
     const customEventListener = (event) => {
       if (!event || !event.detail || event.detail.channel !== channel) {
+        return;
+      }
+      if (event.detail.type && event.detail.type !== responseEventName && event.detail.type !== fallbackResponseEventName) {
         return;
       }
       handleDetail(event.detail);
@@ -403,43 +417,46 @@ async function fetchJSONInPage(doc, url, options) {
         eventBinding.addEventListener('message', messageListener);
       }
       if (docEventTarget) {
-        docEventTarget.addEventListener(responseEventName, customEventListener);
+        for (const name of [responseEventName, fallbackResponseEventName]) {
+          docEventTarget.addEventListener(name, customEventListener);
+        }
       }
     } catch (e) {
       cleanup();
       throw e;
     }
 
-    const script = doc.createElement('script');
-    script.type = 'text/javascript';
-    script.textContent = `
-      (async () => {
-        const payload = ${JSON.stringify(payload)};
-        const targetOrigin = ${JSON.stringify(originForPostMessage)};
-        try {
-          const res = await fetch(payload.url, payload.options);
-          const text = await res.text();
-          const detail = { channel: payload.channel, ok: res.ok, status: res.status, text };
-          if (typeof window !== 'undefined' && typeof window.postMessage === 'function') {
-            window.postMessage(detail, targetOrigin === 'null' ? '*' : targetOrigin);
-          }
-          if (typeof document !== 'undefined' && typeof document.dispatchEvent === 'function' && typeof CustomEvent !== 'undefined') {
-            document.dispatchEvent(new CustomEvent(${JSON.stringify(responseEventName)}, { detail }));
-          }
-        } catch (err) {
-          const message = err && err.message ? String(err.message) : String(err);
-          const detail = { channel: payload.channel, error: message };
-          if (typeof window !== 'undefined' && typeof window.postMessage === 'function') {
-            window.postMessage(detail, targetOrigin === 'null' ? '*' : targetOrigin);
-          }
-          if (typeof document !== 'undefined' && typeof document.dispatchEvent === 'function' && typeof CustomEvent !== 'undefined') {
-            document.dispatchEvent(new CustomEvent(${JSON.stringify(responseEventName)}, { detail }));
-          }
-        }
-      })();
-    `;
-    (doc.documentElement || doc).appendChild(script);
-    script.remove();
+    const targetOrigin = originForPostMessage === 'null' ? '*' : originForPostMessage;
+    const requestPayload = Object.assign({ type: requestEventName, responseEventName }, payload);
+
+    let posted = false;
+    try {
+      if (eventBinding && typeof eventBinding.target.postMessage === 'function') {
+        eventBinding.target.postMessage(requestPayload, targetOrigin);
+        posted = true;
+      } else if (typeof win.postMessage === 'function') {
+        win.postMessage(requestPayload, targetOrigin);
+        posted = true;
+      }
+    } catch (e) {
+      debugFetchBridge(`[fetchBridge] postMessage failed: ${e && e.message}`);
+    }
+
+    let dispatched = false;
+    if (docEventTarget && typeof docEventTarget.dispatchEvent === 'function' && typeof CustomEvent !== 'undefined') {
+      try {
+        docEventTarget.dispatchEvent(new CustomEvent(requestEventName, { detail: requestPayload }));
+        dispatched = true;
+      } catch (e) {
+        debugFetchBridge(`[fetchBridge] dispatchEvent failed: ${e && e.message}`);
+      }
+    }
+
+    if (!posted && !dispatched) {
+      cleanup();
+      reject(new Error('No bridge channel available for page fetch'));
+      return;
+    }
   });
 }
 
@@ -496,7 +513,7 @@ function safeWindowLookup(win, prop) {
   }
 }
 
-function sanitizeFetchOptionsForInjection(options) {
+function sanitizeFetchOptionsForBridge(options) {
   const out = {
     method: options && options.method ? String(options.method).toUpperCase() : 'GET',
     credentials: options && options.credentials ? options.credentials : 'include'
