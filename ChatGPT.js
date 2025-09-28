@@ -8,18 +8,57 @@
 	"priority": 100,
 	"inRepository": true,
 	"translatorType": 4,
-        "browserSupport": "gcsibv",
-        "lastUpdated": "2025-10-02 04:25:00"
+	"browserSupport": "gcsibv",
+	"lastUpdated": "2025-09-28 16:59:40"
 }
 
-/* ChatGPT translator — v0.3.29-alpha
+/* ChatGPT translator — v0.4.0-beta
  * Detect: /c/<id>, /share/..., /g/<project>/c/<id> → instantMessage
  * Authors: platform (ChatGPT) + human/workspace (corporate via XPath)
  * Date: store newest activity as LOCAL ISO8106 with timezone offset (e.g. 2025-09-25T20:45:49-04:00)
  * URL: prefer public /share/... if discovered via backend list match; else keep page URL
- * Attachment: snapshot of current page; add share page when available
+ * Attachment: snapshot of current page when available
  *
  * Changelog
+ * - v0.4.0-beta: First beta release with helper-based fetches and browser/scaffold
+ *   compatibility for retrieving share URLs.
+ * - v0.3.48-alpha: Retry session lookup with in-page fetch when helpers return
+ *   anonymized data (restoring share detection in browsers and Scaffold).
+ * - v0.3.47-alpha: Add default-view fallback when Zotero helper responses lack
+ *   JSON (Scaffold compatibility).
+ * - v0.3.46-alpha: Replace custom page bridge with Zotero request helpers and
+ *   delete the injection fallback.
+ * - v0.3.45-alpha: Drop share-page snapshot attachments to simplify saves.
+ * - v0.3.44-alpha: Attempt a default-view fetch before installing the bridge and
+ *   keep its response as a final fallback when Chromium blocks injected scripts.
+ * - v0.3.43-alpha: Add verbose bridge readiness logging and fall back to a
+ *   one-shot inline fetch when Chromium cannot reach the persistent bridge.
+ * - v0.3.42-alpha: Wait for the page fetch bridge to signal readiness before
+ *   sending requests so Chromium can keep shared URLs with valid tokens.
+ * - v0.3.41-alpha: Retry auth via page bridge when ZU.request lacks the
+ *   session token so Chromium keeps the shared URL.
+ * - v0.3.40-alpha: Skip the ZU.request bridge when Zotero.HTTP isn't
+ *   available (e.g. Scaffold), restoring the legacy session behaviour.
+ * - v0.3.39-alpha: Ensure ZU.request keeps credentials by default so
+ *   Scaffold regains session-bound share lookups.
+ * - v0.3.38-alpha: Restore Cookie header passthrough so Scaffold keeps
+ *   private-session access when bridge auth is missing.
+ * - v0.3.37-alpha: Fix share-mode attachments (link + snapshot) and add
+ *   post-share debug logging.
+ * - v0.3.36-alpha: Route API calls through ZU.request/Zotero.HTTP to reuse
+ *   connector cookie bridges and log which transport succeeds.
+ * - v0.3.35-alpha: Log bridge installation state, normalize connector postMessage
+ *   origin, and keep tracing payload routing for Chromium diagnosis.
+ * - v0.3.34-alpha: Add page-context logging to compare Scaffold vs Chromium
+ *   fetch behavior, tracing every bridge dispatch and fetch outcome.
+ * - v0.3.33-alpha: Harmonize channel dispatch with page-world CustomEvents
+ *   and broaden bridge listeners to catch Chromium connector traffic.
+ * - v0.3.32-alpha: Fan out page-fetch requests across multiple channels and
+ *   expose a direct bridge dispatcher for Chromium connector testing.
+ * - v0.3.31-alpha: Add multi-channel page fetch debug instrumentation and
+ *   fallbacks so Chromium connector can reach the ChatGPT APIs reliably.
+ * - v0.3.30-alpha: Make the page-context fetch bridge persistent so Chromium
+ *   connector can reuse it without timing out.
  * - v0.3.29-alpha: Respect the HTTP method/body that callers pass into
  *   `zoteroFetch` when running inside the live connector so POST/PUT
  *   requests succeed instead of being forced to GET.
@@ -47,7 +86,7 @@
  * - v0.3.21-alpha: Fixed an infinite loop in the polling logic.
  * - v0.3.20-alpha: New communication strategy using a temporary DOM element.
  * - v0.3.19-alpha: Made the universalFetch fallback more robust.
- */
+*/
 
 function detectWeb(doc, url) {
   // Now explicitly detects /c/, /g/.../c/, /share/, and /share/e/
@@ -56,7 +95,7 @@ function detectWeb(doc, url) {
 }
 
 async function doWeb(doc, url) {
-  const VERSION = 'v0.3.29-alpha';
+  const VERSION = 'v0.4.0-beta';
   Zotero.debug(`doWeb ${VERSION}`);
 
   const item = new Zotero.Item("instantMessage");
@@ -75,7 +114,7 @@ async function doWeb(doc, url) {
       { lastName: getHumanFromXPath(doc) || "User", fieldMode: 1, creatorType: "author" }
     ];
     item.url = url;
-    item.attachments = [{ title: "ChatGPT Share Page Snapshot", document: doc }];
+    item.attachments = [];
     try {
       const meta = await getPublicShareMeta(doc, id);
       if (meta) {
@@ -111,10 +150,16 @@ async function doWeb(doc, url) {
         Zotero.debug(`[meta] shareURL found: ${shareURL}`);
         item.url = shareURL;
         item.extra = `Share URL: ${shareURL}\nConversation ID: ${id}`;
-        item.attachments = [
-          { title: "ChatGPT Share Page", url: shareURL, mimeType: "text/html" },
-          { title: "ChatGPT Conversation Snapshot", url: url, mimeType: "text/html" }
-        ];
+        Zotero.debug(`[share] final url set to ${item.url}`);
+        try {
+          const attachDebug = item.attachments.map(a => ({
+            title: a.title,
+            hasDocument: !!a.document,
+            url: a.url || null,
+            snapshot: Object.prototype.hasOwnProperty.call(a, 'snapshot') ? a.snapshot : null
+          }));
+          Zotero.debug(`[share] attachments ${JSON.stringify(attachDebug)}`);
+        } catch (_) {}
       }
     } catch (e) {
       Zotero.debug(`[doWeb:private] error: ${e && e.message}`);
@@ -218,303 +263,220 @@ async function getActiveShareURLForConversation(doc, convId, token) {
 }
 
 async function getAuthInfoFromSession(doc) {
-  const r = await zoteroFetch(doc, '/api/auth/session');
+  const sessionPath = '/api/auth/session';
+  const sessionHeaders = { 'Accept': 'application/json' };
+  const r = await zoteroFetch(doc, sessionPath, { headers: sessionHeaders, responseType: 'json' });
   if (!r.ok || !r.data) {
     Zotero.debug(`[probe] /api/auth/session status=${r.status || 'fail'}`);
     return { token: null, userName: null };
   }
-  const d = r.data;
-  const token = d.accessToken || d.access_token || (d.user && (d.user.accessToken || d.user.access_token)) || null;
-  const userName = d.user && d.user.name ? d.user.name.trim() : null;
+  let data = r.data;
+  let token = data && typeof data === 'object'
+    ? (data.accessToken || data.access_token || (data.user && (data.user.accessToken || data.user.access_token)) || null)
+    : null;
+  let userName = data && data.user && data.user.name ? data.user.name.trim() : null;
+
+  if (!token && doc && doc.defaultView && typeof doc.defaultView.fetch === 'function') {
+    const origin = doc.location && doc.location.origin ? doc.location.origin : 'https://chatgpt.com';
+    const absoluteURL = new URL(sessionPath, origin).href;
+    const fallback = await fetchViaDefaultView(doc, absoluteURL, 'GET', sessionHeaders, null, true, '[probe] session default-view');
+    if (fallback && fallback.ok && fallback.parsed && typeof fallback.parsed === 'object') {
+      data = fallback.parsed;
+      token = data.accessToken || data.access_token || (data.user && (data.user.accessToken || data.user.access_token)) || null;
+      userName = data.user && data.user.name ? data.user.name.trim() : userName;
+    }
+  }
+
+  if (!token) {
+    Zotero.debug('[probe] session fallback failed to obtain token');
+    return { token: null, userName: userName || null };
+  }
+
   Zotero.debug(`[probe] session ok. token=${!!token}, user=${userName}`);
   return { token, userName };
 }
 
-// Simple, robust fetcher using Zotero.HTTP.request with cookies.
-async function zoteroFetch(doc, path, options) {
-  // Fallback for Scaffold IDE, which doesn't have Zotero.HTTP
-  if (typeof Zotero.HTTP === 'undefined') {
-    const url = new URL(path, doc && doc.location ? doc.location.href : undefined).href;
-    const opts = Object.assign({ credentials: 'include' }, options || {});
-    const method = (opts.method || 'GET').toUpperCase();
-    const headers = opts.headers || {};
-    const body = opts.body || null;
-    const useCredentials = opts.credentials !== 'omit';
-
-    try {
-      return await fetchJSONInPage(doc, url, {
-        method,
-        headers,
-        body,
-        credentials: useCredentials ? 'include' : 'omit'
-      });
-    } catch (e) {
-      Zotero.debug(`[scaffoldFetch-error] ${path}: ${e && e.message}`);
-    }
-
-    const w = doc && doc.defaultView;
-    const XHR = (w && w.XMLHttpRequest) ? w.XMLHttpRequest : (typeof XMLHttpRequest !== 'undefined' ? XMLHttpRequest : null);
-    if (!XHR) {
-      return { ok: false, status: 0, data: null };
-    }
-
-    try {
-      const xhr = new XHR();
-      xhr.open(method, url, true);
-      if ('withCredentials' in xhr) {
-        xhr.withCredentials = useCredentials;
-      }
-      for (const [key, value] of Object.entries(headers)) {
-        xhr.setRequestHeader(key, value);
-      }
-
-      const response = await new Promise((resolve, reject) => {
-        xhr.onload = () => resolve(xhr);
-        xhr.onerror = () => reject(new Error('Network error'));
-        xhr.onabort = () => reject(new Error('Request aborted'));
-        xhr.send(body);
-      });
-
-      let data = null;
-      try { data = JSON.parse(response.responseText); } catch {}
-      const status = response.status || 0;
-      const ok = status >= 200 && status < 300;
-      return { ok, status, data };
-    } catch (e) {
-      Zotero.debug(`[scaffoldFetch-xhr-error] ${path}: ${e && e.message}`);
-      return { ok: false, status: 0, data: null };
-    }
+function safeParseJSON(value) {
+  if (value == null) return null;
+  if (typeof value === 'object') return value;
+  if (typeof value === 'string' && value.length) {
+    try { return JSON.parse(value); }
+    catch { return null; }
   }
-  
-  // Live site logic: use Zotero.HTTP.request
-  try {
-    const url = new URL(path, doc.location.href).href;
-    const opts = Object.assign({}, options);
-    const method = (opts && opts.method ? String(opts.method) : 'GET').toUpperCase();
-    if (opts && Object.prototype.hasOwnProperty.call(opts, 'method')) {
-      delete opts.method;
-    }
-    opts.headers = Object.assign({}, opts && opts.headers);
-    // Manually pass the browser's cookies for authentication
-    if (doc.cookie) {
-      opts.headers['Cookie'] = doc.cookie;
-    }
-
-    if (method === 'GET' && opts && Object.prototype.hasOwnProperty.call(opts, 'body')) {
-      delete opts.body;
-    }
-
-    const xhr = await Zotero.HTTP.request(method, url, opts);
-    let data = null;
-    try { data = JSON.parse(xhr.response); } catch {}
-    return { ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data: data };
-  } catch (e) {
-    Zotero.debug(`[zoteroFetch-error] ${path}: ${e && e.message}`);
-    return { ok: false, status: 0, data: null };
-  }
-}
-/* ====== Page fetch bridge for sandboxed environments ====== */
-
-async function fetchJSONInPage(doc, url, options) {
-  const win = doc && doc.defaultView;
-  if (!win) {
-    throw new Error('No window available for page fetch');
-  }
-
-  const eventBinding = getWindowEventTarget(win);
-  const docEventTarget = (doc && typeof doc.addEventListener === 'function') ? doc : null;
-  if (!eventBinding && !docEventTarget) {
-    throw new Error('Page environment does not support event listeners');
-  }
-
-  const channel = `zotero-chatgpt-fetch-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const payload = {
-    url,
-    options: sanitizeFetchOptionsForInjection(options),
-    channel
-  };
-
-  const responseEventName = `zotero-chatgpt-fetch-response-${channel}`;
-
-  const originForPostMessage = (win.location && win.location.origin && win.location.origin !== 'null')
-    ? win.location.origin
-    : '*';
-
-  return new Promise((resolve, reject) => {
-    let timer = null;
-    const cleanup = () => {
-      if (timer) {
-        clearTimeout(timer);
-      }
-      try {
-        if (eventBinding) {
-          eventBinding.removeEventListener('message', messageListener);
-        }
-      } catch (e) {
-        debugFetchBridge(`[fetchBridge] remove listener failed: ${e && e.message}`);
-      }
-      if (docEventTarget) {
-        try {
-          docEventTarget.removeEventListener(responseEventName, customEventListener);
-        } catch (e) {
-          debugFetchBridge(`[fetchBridge] remove custom listener failed: ${e && e.message}`);
-        }
-      }
-    };
-
-    const handleDetail = (detail) => {
-      cleanup();
-      if (!detail) {
-        reject(new Error('Page fetch bridge returned no data'));
-        return;
-      }
-      if (detail.error) {
-        reject(new Error(detail.error));
-        return;
-      }
-      let parsed = null;
-      if (typeof detail.text === 'string' && detail.text.length) {
-        try { parsed = JSON.parse(detail.text); } catch {}
-      }
-      resolve({ ok: !!detail.ok, status: detail.status || 0, data: parsed });
-    };
-
-    const messageListener = (event) => {
-      if (!event.data || event.data.channel !== channel) {
-        return;
-      }
-      handleDetail(event.data);
-    };
-
-    const customEventListener = (event) => {
-      if (!event || !event.detail || event.detail.channel !== channel) {
-        return;
-      }
-      handleDetail(event.detail);
-    };
-
-    timer = setTimeout(() => {
-      cleanup();
-      reject(new Error('Timed out waiting for page fetch response'));
-    }, 10000);
-
-    try {
-      if (eventBinding) {
-        eventBinding.addEventListener('message', messageListener);
-      }
-      if (docEventTarget) {
-        docEventTarget.addEventListener(responseEventName, customEventListener);
-      }
-    } catch (e) {
-      cleanup();
-      throw e;
-    }
-
-    const script = doc.createElement('script');
-    script.type = 'text/javascript';
-    script.textContent = `
-      (async () => {
-        const payload = ${JSON.stringify(payload)};
-        const targetOrigin = ${JSON.stringify(originForPostMessage)};
-        try {
-          const res = await fetch(payload.url, payload.options);
-          const text = await res.text();
-          const detail = { channel: payload.channel, ok: res.ok, status: res.status, text };
-          if (typeof window !== 'undefined' && typeof window.postMessage === 'function') {
-            window.postMessage(detail, targetOrigin === 'null' ? '*' : targetOrigin);
-          }
-          if (typeof document !== 'undefined' && typeof document.dispatchEvent === 'function' && typeof CustomEvent !== 'undefined') {
-            document.dispatchEvent(new CustomEvent(${JSON.stringify(responseEventName)}, { detail }));
-          }
-        } catch (err) {
-          const message = err && err.message ? String(err.message) : String(err);
-          const detail = { channel: payload.channel, error: message };
-          if (typeof window !== 'undefined' && typeof window.postMessage === 'function') {
-            window.postMessage(detail, targetOrigin === 'null' ? '*' : targetOrigin);
-          }
-          if (typeof document !== 'undefined' && typeof document.dispatchEvent === 'function' && typeof CustomEvent !== 'undefined') {
-            document.dispatchEvent(new CustomEvent(${JSON.stringify(responseEventName)}, { detail }));
-          }
-        }
-      })();
-    `;
-    (doc.documentElement || doc).appendChild(script);
-    script.remove();
-  });
-}
-
-function debugFetchBridge(message) {
-  if (typeof Zotero !== 'undefined' && typeof Zotero.debug === 'function') {
-    Zotero.debug(message);
-  }
-}
-
-function getWindowEventTarget(win) {
-  const seen = new Set();
-  const candidates = [];
-
-  const enqueue = (candidate) => {
-    if (!candidate) return;
-    if (seen.has(candidate)) return;
-    seen.add(candidate);
-    candidates.push(candidate);
-  };
-
-  enqueue(win);
-  enqueue(safeWindowLookup(win, 'wrappedJSObject'));
-  enqueue(safeWindowLookup(win, 'window'));
-  enqueue(safeWindowLookup(win, 'self'));
-  enqueue(safeWindowLookup(win, 'top'));
-  if (typeof window !== 'undefined') enqueue(window);
-  if (typeof globalThis !== 'undefined') enqueue(globalThis);
-
-  for (const candidate of candidates) {
-    try {
-      const add = candidate.addEventListener;
-      const remove = candidate.removeEventListener;
-      if (typeof add === 'function' && typeof remove === 'function') {
-        return {
-          target: candidate,
-          addEventListener: add.bind(candidate),
-          removeEventListener: remove.bind(candidate)
-        };
-      }
-    } catch (e) {
-      debugFetchBridge(`[fetchBridge] candidate rejected: ${e && e.message}`);
-    }
-  }
-
   return null;
 }
 
-function safeWindowLookup(win, prop) {
+// Simple, robust fetcher with multiple fallbacks (connector-friendly first).
+async function zoteroFetch(doc, path, options) {
+  const baseHref = doc && doc.location ? String(doc.location.href) : null;
+  let url;
   try {
-    return win && win[prop];
+    url = new URL(path, baseHref || undefined).href;
+  } catch (_) {
+    url = path;
+  }
+  const opts = Object.assign({ headers: {}, method: 'GET' }, options || {});
+  const method = (opts.method || 'GET').toUpperCase();
+  const headers = Object.assign({}, opts.headers || {});
+  const body = opts.body !== undefined ? opts.body : null;
+  const label = `[zoteroFetch] ${method} ${path}`;
+
+  const wantsJSON = (() => {
+    if (opts.responseType === 'json') return true;
+    const accept = headers.Accept || headers.accept;
+    if (accept && typeof accept === 'string' && accept.toLowerCase().includes('application/json')) {
+      return true;
+    }
+    return false;
+  })();
+
+  const finalize = (status, raw, jsonCandidate) => {
+    if (wantsJSON) {
+      const parsed = jsonCandidate !== undefined ? jsonCandidate : safeParseJSON(raw);
+      return { ok: status >= 200 && status < 300, status, data: parsed };
+    }
+    return { ok: status >= 200 && status < 300, status, data: raw };
+  };
+
+  // Preferred path: ZU.request (available in translator sandbox + connector)
+  try {
+    if (typeof ZU !== 'undefined' && typeof ZU.request === 'function') {
+      const params = {
+        method,
+        headers,
+        responseType: wantsJSON ? 'json' : 'text'
+      };
+      if (method !== 'GET' && method !== 'HEAD' && body != null) {
+        params.body = body;
+      }
+      if (opts.timeout) {
+        params.timeout = opts.timeout;
+      }
+      Zotero.debug(`${label} via ZU.request`);
+      const resp = await ZU.request(url, params);
+      const status = resp && typeof resp.status === 'number' ? resp.status : 0;
+      const raw = resp && (resp.responseText !== undefined ? resp.responseText : resp.body !== undefined ? resp.body : null);
+      const jsonCandidate = wantsJSON ? (resp && (resp.responseJSON !== undefined ? resp.responseJSON : safeParseJSON(raw))) : undefined;
+      let result = finalize(status, raw, jsonCandidate);
+      if (wantsJSON && (!result.data || typeof result.data !== 'object')) {
+        const fallback = await fetchViaDefaultView(doc, url, method, headers, body, wantsJSON, `${label} (default-view fallback)`);
+        if (fallback && fallback.ok && fallback.parsed && typeof fallback.parsed === 'object') {
+          return finalize(fallback.status, fallback.raw, fallback.parsed);
+        }
+      }
+      return result;
+    }
   } catch (e) {
-    debugFetchBridge(`[fetchBridge] lookup ${prop} failed: ${e && e.message}`);
+    Zotero.debug(`${label} ZU.request error: ${e && e.message}`);
+  }
+
+  // Secondary path: Zotero.HTTP.request (background-bridged, carries cookies)
+  try {
+    if (typeof Zotero !== 'undefined' && Zotero.HTTP && typeof Zotero.HTTP.request === 'function') {
+      const httpOpts = {
+        headers,
+        responseType: 'text'
+      };
+      if (method !== 'GET' && method !== 'HEAD' && body != null) {
+        httpOpts.body = body;
+      }
+      if (opts.timeout) {
+        httpOpts.timeout = opts.timeout;
+      }
+      Zotero.debug(`${label} via Zotero.HTTP.request`);
+      const xhr = await Zotero.HTTP.request(method, url, httpOpts);
+      const raw = xhr && typeof xhr.response === 'string' ? xhr.response : (xhr && xhr.responseText);
+      const status = xhr && typeof xhr.status === 'number' ? xhr.status : 0;
+      let result = finalize(status, raw, undefined);
+      if (wantsJSON && (!result.data || typeof result.data !== 'object')) {
+        const fallback = await fetchViaDefaultView(doc, url, method, headers, body, wantsJSON, `${label} (default-view fallback)`);
+        if (fallback && fallback.ok && fallback.parsed && typeof fallback.parsed === 'object') {
+          return finalize(fallback.status, fallback.raw, fallback.parsed);
+        }
+      }
+      return result;
+    }
+  } catch (e) {
+    Zotero.debug(`${label} Zotero.HTTP.request error: ${e && e.message}`);
+  }
+
+  // Legacy fallback: page-context bridge for environments without HTTP helpers
+  const useCredentials = opts.credentials !== 'omit';
+  const w = doc && doc.defaultView;
+  const XHR = (w && w.XMLHttpRequest) ? w.XMLHttpRequest : (typeof XMLHttpRequest !== 'undefined' ? XMLHttpRequest : null);
+  if (!XHR) {
+    return { ok: false, status: 0, data: null };
+  }
+
+  try {
+    const xhr = new XHR();
+    xhr.open(method, url, true);
+    if ('withCredentials' in xhr) {
+      xhr.withCredentials = useCredentials;
+    }
+    for (const [key, value] of Object.entries(headers)) {
+      xhr.setRequestHeader(key, value);
+    }
+
+    const response = await new Promise((resolve, reject) => {
+      xhr.onload = () => resolve(xhr);
+      xhr.onerror = () => reject(new Error('Network error'));
+      xhr.onabort = () => reject(new Error('Request aborted'));
+      xhr.send(body);
+    });
+
+    const status = response.status || 0;
+    let result = finalize(status, response.responseText, undefined);
+    if (wantsJSON && (!result.data || typeof result.data !== 'object')) {
+      const fallback = await fetchViaDefaultView(doc, url, method, headers, body, wantsJSON, `${label} (default-view fallback)`);
+      if (fallback && fallback.ok && fallback.parsed && typeof fallback.parsed === 'object') {
+        return finalize(fallback.status, fallback.raw, fallback.parsed);
+      }
+    }
+    return result;
+  } catch (e) {
+    Zotero.debug(`[scaffoldFetch-xhr-error] ${path}: ${e && e.message}`);
+    return { ok: false, status: 0, data: null };
+  }
+}
+
+async function fetchViaDefaultView(doc, url, method, headers, body, wantsJSON, label) {
+  const win = doc && doc.defaultView;
+  if (!win || typeof win.fetch !== 'function') {
+    return null;
+  }
+
+  const fetchHeaders = {};
+  for (const [key, value] of Object.entries(headers || {})) {
+    if (value != null) {
+      fetchHeaders[key] = String(value);
+    }
+  }
+
+  const fetchOptions = {
+    method,
+    credentials: 'include',
+    headers: fetchHeaders
+  };
+  if (body != null) {
+    fetchOptions.body = body;
+  }
+
+  try {
+    Zotero.debug(`${label} via defaultView.fetch`);
+    const response = await win.fetch(url, fetchOptions);
+    const status = typeof response.status === 'number' ? response.status : 0;
+    let raw = '';
+    try {
+      raw = await response.text();
+    } catch (_) {}
+    const parsed = wantsJSON ? safeParseJSON(raw) : null;
+    return { ok: !!response.ok, status, raw, parsed };
+  } catch (e) {
+    Zotero.debug(`${label} default-view error: ${e && e.message}`);
     return null;
   }
 }
-
-function sanitizeFetchOptionsForInjection(options) {
-  const out = {
-    method: options && options.method ? String(options.method).toUpperCase() : 'GET',
-    credentials: options && options.credentials ? options.credentials : 'include'
-  };
-  if (options && options.headers && typeof options.headers === 'object') {
-    out.headers = {};
-    for (const [key, value] of Object.entries(options.headers)) {
-      if (value != null) {
-        out.headers[String(key)] = String(value);
-      }
-    }
-  }
-  if (options && options.body != null) {
-    out.body = options.body;
-  }
-  return out;
-}
-
 /* ====== time extraction (now returns LOCAL timestamp with offset) ====== */
 
 function pickIsoDate(conv) {
@@ -575,6 +537,11 @@ function formatLocalOffset(ms) {
   const tzm = String(abs % 60).padStart(2, '0');
   return `${yyyy}-${MM}-${dd}T${hh}:${mm}:${ss}${sign}${tzh}:${tzm}`;
 }
+
+/** BEGIN TEST CASES **/
+var testCases = [
+]
+/** END TEST CASES **/
 
 /** BEGIN TEST CASES **/
 var testCases = [
