@@ -9,84 +9,32 @@
 	"inRepository": true,
 	"translatorType": 4,
 	"browserSupport": "gcsibv",
-	"lastUpdated": "2025-09-28 16:59:40"
+	"lastUpdated": "2025-09-29 13:08:05"
 }
 
-/* ChatGPT translator — v0.4.0-beta
+/* ChatGPT translator — v0.5.0-beta
  * Detect: /c/<id>, /share/..., /g/<project>/c/<id> → instantMessage
  * Authors: platform (ChatGPT) + human/workspace (corporate via XPath)
- * Date: store newest activity as LOCAL ISO8106 with timezone offset (e.g. 2025-09-25T20:45:49-04:00)
+ * Date: store newest activity as local ISO8601 with timezone offset (e.g. 2025-09-25T20:45:49-04:00)
  * URL: prefer public /share/... if discovered via backend list match; else keep page URL
  * Attachment: snapshot of current page when available
  *
  * Changelog
- * - v0.4.0-beta: First beta release with helper-based fetches and browser/scaffold
- *   compatibility for retrieving share URLs.
- * - v0.3.48-alpha: Retry session lookup with in-page fetch when helpers return
- *   anonymized data (restoring share detection in browsers and Scaffold).
- * - v0.3.47-alpha: Add default-view fallback when Zotero helper responses lack
- *   JSON (Scaffold compatibility).
- * - v0.3.46-alpha: Replace custom page bridge with Zotero request helpers and
- *   delete the injection fallback.
- * - v0.3.45-alpha: Drop share-page snapshot attachments to simplify saves.
- * - v0.3.44-alpha: Attempt a default-view fetch before installing the bridge and
- *   keep its response as a final fallback when Chromium blocks injected scripts.
- * - v0.3.43-alpha: Add verbose bridge readiness logging and fall back to a
- *   one-shot inline fetch when Chromium cannot reach the persistent bridge.
- * - v0.3.42-alpha: Wait for the page fetch bridge to signal readiness before
- *   sending requests so Chromium can keep shared URLs with valid tokens.
- * - v0.3.41-alpha: Retry auth via page bridge when ZU.request lacks the
- *   session token so Chromium keeps the shared URL.
- * - v0.3.40-alpha: Skip the ZU.request bridge when Zotero.HTTP isn't
- *   available (e.g. Scaffold), restoring the legacy session behaviour.
- * - v0.3.39-alpha: Ensure ZU.request keeps credentials by default so
- *   Scaffold regains session-bound share lookups.
- * - v0.3.38-alpha: Restore Cookie header passthrough so Scaffold keeps
- *   private-session access when bridge auth is missing.
- * - v0.3.37-alpha: Fix share-mode attachments (link + snapshot) and add
- *   post-share debug logging.
- * - v0.3.36-alpha: Route API calls through ZU.request/Zotero.HTTP to reuse
- *   connector cookie bridges and log which transport succeeds.
- * - v0.3.35-alpha: Log bridge installation state, normalize connector postMessage
- *   origin, and keep tracing payload routing for Chromium diagnosis.
- * - v0.3.34-alpha: Add page-context logging to compare Scaffold vs Chromium
- *   fetch behavior, tracing every bridge dispatch and fetch outcome.
- * - v0.3.33-alpha: Harmonize channel dispatch with page-world CustomEvents
- *   and broaden bridge listeners to catch Chromium connector traffic.
- * - v0.3.32-alpha: Fan out page-fetch requests across multiple channels and
- *   expose a direct bridge dispatcher for Chromium connector testing.
- * - v0.3.31-alpha: Add multi-channel page fetch debug instrumentation and
- *   fallbacks so Chromium connector can reach the ChatGPT APIs reliably.
- * - v0.3.30-alpha: Make the page-context fetch bridge persistent so Chromium
- *   connector can reuse it without timing out.
- * - v0.3.29-alpha: Respect the HTTP method/body that callers pass into
- *   `zoteroFetch` when running inside the live connector so POST/PUT
- *   requests succeed instead of being forced to GET.
- * - v0.3.28-alpha: Bridge page-context fetch responses through both
- *   CustomEvent dispatch and window.postMessage so Chromium-based
- *   connectors that restrict message listeners continue to receive
- *   responses reliably.
- * - v0.3.27-alpha: Rework the page-context fetch bridge so it binds the
- *   event listener functions from whichever window-like object is
- *   available, avoiding `win.addEventListener is not a function`
- *   failures that Chrome-based connectors were still hitting.
- * - v0.3.26-alpha: Harden the page-context fetch bridge so Chromium-based
- * connectors unwrap the real window before attaching message listeners,
- * avoiding `win.addEventListener` failures.
- * - v0.3.25-alpha: Added a resilient page-context fetch bridge so Chromium-based
- * connectors can retrieve session tokens and conversation metadata without
- * triggering network errors.
- * - v0.3.24-alpha: Fix Scaffold fallback fetch by resolving relative API URLs
- * against the current document before issuing the request.
- * - v0.3.23-alpha: Major simplification. Removed the complex, failing script-injection
- * mechanism. The translator now uses a single, reliable `Zotero.HTTP.request`
- * method for all API calls, with corrected logic to manually pass browser
- * cookies for authentication. This should work in the live connector.
- * - v0.3.22-alpha: Fixed a potential race condition in the script injection logic.
- * - v0.3.21-alpha: Fixed an infinite loop in the polling logic.
- * - v0.3.20-alpha: New communication strategy using a temporary DOM element.
- * - v0.3.19-alpha: Made the universalFetch fallback more robust.
-*/
+ * - v0.5.0-beta: Ensured resilient share detection (metadata/DOM probes + quick backend checks), 
+ *   smarter private URL handling, and consistent snapshots across public and private pages.
+ * - v0.4.0: Stabilized the translator by preferring connector helpers (ZU.request →
+ *   Zotero.HTTP → page fetch), keeping API calls same-origin, parsing helper text
+ *   responses as JSON, and discovering share links deterministically with local-offset
+ *   metadata.
+ */
+
+const ZOTERO_FETCH_DEFAULT_TIMEOUT_MS = 7000;
+const SHARE_LIST_TIMEOUT_MS = 3500;
+const SHARE_PROBE_TIMEOUT_MS = 2000;
+const SHARE_URL_REGEX = /https?:\/\/(?:chatgpt\.com|chat\.openai\.com)\/share\/([0-9a-f-]{36})/i;
+const SHARE_PATH_REGEX = /^\/?share\/([0-9a-f-]{36})/i;
+const SHARE_ID_REGEX = /[0-9a-f-]{36}/i;
+const NO_SHARE_CONFIRMED = Symbol('chatgpt:no-share');
 
 function detectWeb(doc, url) {
   // Now explicitly detects /c/, /g/.../c/, /share/, and /share/e/
@@ -95,41 +43,31 @@ function detectWeb(doc, url) {
 }
 
 async function doWeb(doc, url) {
-  const VERSION = 'v0.4.0-beta';
+  const VERSION = 'v0.5.0-beta';
   Zotero.debug(`doWeb ${VERSION}`);
 
+  // Sets defaults that will be changed later
   const item = new Zotero.Item("instantMessage");
   item.title = (doc && doc.title) ? doc.title : "ChatGPT Conversation";
   item.date = nowLocalOffset(); // Default date
   item.libraryCatalog = "OpenAI";
 
+  // Gets information about the chat session and URL
   const isSharePage = url.includes('/share');
   const id = extractIdFromAnyUrl(url);
 
-  if (isSharePage && id) {
-    // --- Scenario 1: We are on a public share page (no session) ---
-    Zotero.debug(`[mode] Public Share Page, share_id=${id}`);
-    item.creators = [
-      { lastName: "ChatGPT", fieldMode: 1, creatorType: "author" },
-      { lastName: getHumanFromXPath(doc) || "User", fieldMode: 1, creatorType: "author" }
-    ];
-    item.url = url;
-    item.attachments = [];
-    try {
-      const meta = await getPublicShareMeta(doc, id);
-      if (meta) {
-        if (meta.title) { Zotero.debug(`[meta] title: ${meta.title}`); item.title = meta.title; }
-        if (meta.isoDate) { Zotero.debug(`[meta] isoDate(local): ${meta.isoDate}`); item.date = meta.isoDate; }
-      }
-    } catch (e) {
-      Zotero.debug(`[doWeb:share] error: ${e && e.message}`);
-    }
-  } else if (id) {
-    // --- Scenario 2: We are on a private conversation page (has session) ---
+  if (id && !isSharePage) {
+    // --- Scenario 1: We are on a private conversation page (has session) ---
     Zotero.debug(`[mode] Private Conversation Page, conv_id=${id}`);
-    item.url = url; // Default URL
-    item.extra = `Conversation ID: ${id}`;
-    item.attachments = [{ title: "ChatGPT Conversation Snapshot", document: doc }];
+    const privateConversationURL = url;
+    item.url = privateConversationURL; // Default URL
+    item.attachments = [{
+      title: "ChatGPT Conversation Snapshot",
+      // Known bug, show attachment url will revert to the items URL
+      url: privateConversationURL,
+      document: doc,
+      snapshot: true
+    }];
     try {
       const auth = await getAuthInfoFromSession(doc);
       
@@ -140,16 +78,37 @@ async function doWeb(doc, url) {
       ];
 
       const meta = await getConversationMetaFromHiddenAPI(doc, id, auth.token);
+      let shareURL = null;
+      let skipShareList = false;
       if (meta) {
         if (meta.title) { Zotero.debug(`[meta] title: ${meta.title}`); item.title = meta.title; }
         if (meta.isoDate) { Zotero.debug(`[meta] isoDate(local): ${meta.isoDate}`); item.date = meta.isoDate; }
+        if (meta.shareURL) { Zotero.debug(`[meta] shareURL (embedded) ${meta.shareURL}`); shareURL = meta.shareURL; }
       }
 
-      const shareURL = await getActiveShareURLForConversation(doc, id, auth.token);
+      if (!shareURL) {
+        shareURL = findShareURLInDocument(doc);
+        if (shareURL) {
+          Zotero.debug(`[meta] shareURL (document) ${shareURL}`);
+        }
+      }
+
+      if (!shareURL && auth.token) {
+        const probeResult = await probeShareURL(doc, id, auth.token);
+        if (probeResult === NO_SHARE_CONFIRMED) {
+          skipShareList = true;
+        } else if (probeResult) {
+          shareURL = probeResult;
+        }
+      }
+
+      if (!shareURL && !skipShareList && auth.token) {
+        shareURL = await getActiveShareURLForConversation(doc, id, auth.token);
+      }
       if (shareURL) {
         Zotero.debug(`[meta] shareURL found: ${shareURL}`);
         item.url = shareURL;
-        item.extra = `Share URL: ${shareURL}\nConversation ID: ${id}`;
+        item.extra = `Private URL: ${privateConversationURL}`;
         Zotero.debug(`[share] final url set to ${item.url}`);
         try {
           const attachDebug = item.attachments.map(a => ({
@@ -164,6 +123,29 @@ async function doWeb(doc, url) {
     } catch (e) {
       Zotero.debug(`[doWeb:private] error: ${e && e.message}`);
     }
+  } else if (isSharePage && id) {
+    // --- Scenario 2: We are on a public share page (no session) ---
+    Zotero.debug(`[mode] Public Share Page, share_id=${id}`);
+    item.creators = [
+      { lastName: "ChatGPT", fieldMode: 1, creatorType: "author" },
+      { lastName: getHumanFromXPath(doc) || "User", fieldMode: 1, creatorType: "author" }
+    ];
+    item.url = url;
+    item.attachments = [{
+      title: "ChatGPT Conversation Snapshot",
+      url,
+      document: doc,
+      snapshot: true
+    }];
+    try {
+      const meta = await getPublicShareMeta(doc, id);
+      if (meta) {
+        if (meta.title) { Zotero.debug(`[meta] title: ${meta.title}`); item.title = meta.title; }
+        if (meta.isoDate) { Zotero.debug(`[meta] isoDate(local): ${meta.isoDate}`); item.date = meta.isoDate; }
+      }
+    } catch (e) {
+      Zotero.debug(`[doWeb:share] error: ${e && e.message}`);
+    }
   } else {
     // Fallback for URLs that passed detection but not ID extraction
     item.creators = [
@@ -171,7 +153,7 @@ async function doWeb(doc, url) {
         { lastName: getHumanFromXPath(doc) || "User", fieldMode: 1, creatorType: "author" }
     ];
     item.url = url;
-    item.attachments = [{ title: "ChatGPT Conversation Snapshot", document: doc }];
+    item.attachments = [{ title: "ChatGPT Conversation Snapshot", document: doc, snapshot: true }];
   }
 
   item.complete();
@@ -193,12 +175,159 @@ function getHumanFromXPath(doc) {
   } catch (e) {
     Zotero.debug(`[author:xpath] error: ${e && e.message}`);
   }
+  const metaName = extractHumanFromMeta(doc);
+  if (metaName) {
+    Zotero.debug(`[author:meta] "${metaName}"`);
+    return metaName;
+  }
+  const titleName = extractHumanFromTitle(doc);
+  if (titleName) {
+    Zotero.debug(`[author:title] "${titleName}"`);
+    return titleName;
+  }
   return null;
+}
+
+function extractHumanFromMeta(doc) {
+  if (!doc || typeof doc.querySelector !== 'function') return null;
+  const selectors = [
+    'meta[property="og:title"]',
+    'meta[name="twitter:title"]',
+    'meta[name="author"]'
+  ];
+  for (const sel of selectors) {
+    const el = doc.querySelector(sel);
+    if (!el) continue;
+    const content = el.getAttribute('content') || el.getAttribute('value');
+    const candidate = extractNameFromTitleLike(content);
+    if (candidate) return candidate;
+    const cleaned = cleanHumanName(content);
+    if (cleaned) return cleaned;
+  }
+  return null;
+}
+
+function extractHumanFromTitle(doc) {
+  if (!doc) return null;
+  return extractNameFromTitleLike(doc.title);
+}
+
+function extractNameFromTitleLike(value) {
+  if (!value || typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const separators = [' — ', ' – ', ' - ', ': '];
+  for (const sep of separators) {
+    if (trimmed.includes(sep)) {
+      const parts = trimmed.split(sep).map(cleanHumanName);
+      for (const part of parts) {
+        if (part) return part;
+      }
+    }
+  }
+  return cleanHumanName(trimmed);
+}
+
+function cleanHumanName(value) {
+  if (!value || typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (/chatgpt/i.test(trimmed)) return null;
+  if (/openai/i.test(trimmed)) return null;
+  return trimmed;
 }
 
 function extractIdFromAnyUrl(url) {
   const m = url.match(/(?:c|share(?:\/e)?)\/([0-9a-f-]{36})/i);
   return m ? m[1] : null;
+}
+
+function getDefaultShareHost(doc) {
+  const host = doc && doc.location && String(doc.location.host);
+  if (host && host.includes('chat.openai.com')) {
+    return 'https://chat.openai.com';
+  }
+  return 'https://chatgpt.com';
+}
+
+function normalizeShareCandidate(candidate, doc, contextKey) {
+  if (!candidate || typeof candidate !== 'string') return null;
+  let cleaned = candidate;
+  if (cleaned.includes('\\u002F')) {
+    cleaned = cleaned.replace(/\\u002F/gi, '/');
+  }
+  const directMatch = cleaned.match(SHARE_URL_REGEX);
+  if (directMatch) {
+    const matchedHost = cleaned.match(/https?:\/\/(chatgpt\.com|chat\.openai\.com)/i);
+    const host = matchedHost ? `https://${matchedHost[1].toLowerCase()}` : getDefaultShareHost(doc);
+    return `${host}/share/${directMatch[1].toLowerCase()}`;
+  }
+  const pathMatch = cleaned.match(SHARE_PATH_REGEX);
+  if (pathMatch) {
+    return `${getDefaultShareHost(doc)}/share/${pathMatch[1].toLowerCase()}`;
+  }
+  if (contextKey && /share/i.test(contextKey)) {
+    const idMatch = cleaned.match(SHARE_ID_REGEX);
+    if (idMatch) {
+      return `${getDefaultShareHost(doc)}/share/${idMatch[0].toLowerCase()}`;
+    }
+  }
+  return null;
+}
+
+function findShareURLInValue(value, doc, contextKey, seen) {
+  if (typeof value === 'string') {
+    return normalizeShareCandidate(value, doc, contextKey);
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const result = findShareURLInValue(entry, doc, contextKey, seen);
+      if (result) return result;
+    }
+    return null;
+  }
+  if (value && typeof value === 'object') {
+    if (seen.has(value)) return null;
+    seen.add(value);
+    for (const [key, entry] of Object.entries(value)) {
+      const result = findShareURLInValue(entry, doc, key, seen);
+      if (result) return result;
+    }
+  }
+  return null;
+}
+
+function findShareURLInConversationData(conv, doc) {
+  if (!conv || typeof conv !== 'object') return null;
+  return findShareURLInValue(conv, doc, '', new Set());
+}
+
+function extractShareURLFromAny(value, doc) {
+  return findShareURLInValue(value, doc, '', new Set());
+}
+
+function findShareURLInDocument(doc) {
+  if (!doc || typeof doc.querySelector !== 'function') return null;
+  const candidates = [
+    ['meta[property="og:url"]', 'content'],
+    ['meta[name="twitter:url"]', 'content'],
+    ['link[rel="canonical"]', 'href'],
+    ['meta[name="twitter:app:url:iphone"]', 'content'],
+    ['meta[name="twitter:app:url:googleplay"]', 'content']
+  ];
+  for (const [selector, attr] of candidates) {
+    const el = doc.querySelector(selector);
+    if (!el) continue;
+    const value = el.getAttribute(attr);
+    const shareURL = normalizeShareCandidate(value, doc, selector);
+    if (shareURL) return shareURL;
+  }
+  const anchor = doc.querySelector('a[href*="/share/"]');
+  if (anchor) {
+    const shareURL = normalizeShareCandidate(anchor.getAttribute('href'), doc, 'anchor');
+    if (shareURL) return shareURL;
+  }
+  return null;
 }
 
 /* ---------- API Functions ---------- */
@@ -212,12 +341,17 @@ async function getConversationMetaFromHiddenAPI(doc, convId, token) {
     { headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' } }
   );
   Zotero.debug(`[probe] conv (token) status=${r.status} ok=${r.ok}`);
+  if (r.status === 401 || r.status === 403) {
+    Zotero.debug('[probe] conv auth expired; skipping protected metadata');
+    return null;
+  }
   if (!r.ok || !r.data) return null;
 
   const conv = r.data;
   const title = (typeof conv.title === 'string' && conv.title.trim()) ? conv.title.trim() : null;
   const isoLocal = pickIsoDate(conv);
-  return { title, isoDate: isoLocal };
+  const shareURL = findShareURLInConversationData(conv, doc);
+  return { title, isoDate: isoLocal, shareURL };
 }
 
 async function getPublicShareMeta(doc, shareId) {
@@ -235,15 +369,54 @@ async function getPublicShareMeta(doc, shareId) {
   return { title, isoDate: isoLocal };
 }
 
+async function probeShareURL(doc, convId, token) {
+  if (!token) return null;
+
+  const probe = await zoteroFetch(
+    doc,
+    `/backend-api/conversation/${convId}/share`,
+    {
+      headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' },
+      timeout: SHARE_PROBE_TIMEOUT_MS
+    }
+  );
+  Zotero.debug(`[share] probe status=${probe.status} ok=${probe.ok}`);
+  if (!probe.ok) {
+    if (probe.status === 404) {
+      Zotero.debug('[share] probe indicates no share is currently published');
+      return NO_SHARE_CONFIRMED;
+    }
+    return null;
+  }
+  if (!probe.data) return null;
+  const shareURL = extractShareURLFromAny(probe.data, doc);
+  if (shareURL) return shareURL;
+  if (typeof probe.data === 'object' && probe.data.share_id) {
+    return `${getDefaultShareHost(doc)}/share/${String(probe.data.share_id).toLowerCase()}`;
+  }
+  return null;
+}
+
 async function getActiveShareURLForConversation(doc, convId, token) {
   if (!token) { Zotero.debug('[share] no token provided, skipping'); return null; }
 
   const list = await zoteroFetch(
     doc,
     `/backend-api/shared_conversations?order=created`,
-    { headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' } }
+    {
+      headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' },
+      timeout: SHARE_LIST_TIMEOUT_MS
+    }
   );
   Zotero.debug(`[share] list status=${list.status} ok=${list.ok}`);
+  if (!list.ok && list.status === 0) {
+    Zotero.debug(`[share] shared list lookup timed out after ${SHARE_LIST_TIMEOUT_MS}ms`);
+    return null;
+  }
+  if (list.status === 401 || list.status === 403) {
+    Zotero.debug('[share] token expired; skipping share lookup');
+    return null;
+  }
   if (!list.ok || !list.data || !Array.isArray(list.data.items)) return null;
 
   const items = list.data.items.filter(x => x && (x.conversation_id === convId));
@@ -306,6 +479,22 @@ function safeParseJSON(value) {
   return null;
 }
 
+function getHeaderValue(headers, name) {
+  if (!headers || typeof headers !== 'object') return null;
+  const target = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (typeof key === 'string' && key.toLowerCase() === target) {
+      return headers[key];
+    }
+  }
+  return null;
+}
+
+function isJSONContentType(value) {
+  if (!value || typeof value !== 'string') return false;
+  return /\bapplication\/([a-z0-9.+-]*json)\b/i.test(value);
+}
+
 // Simple, robust fetcher with multiple fallbacks (connector-friendly first).
 async function zoteroFetch(doc, path, options) {
   const baseHref = doc && doc.location ? String(doc.location.href) : null;
@@ -320,6 +509,10 @@ async function zoteroFetch(doc, path, options) {
   const headers = Object.assign({}, opts.headers || {});
   const body = opts.body !== undefined ? opts.body : null;
   const label = `[zoteroFetch] ${method} ${path}`;
+  if (opts.timeout == null) {
+    opts.timeout = ZOTERO_FETCH_DEFAULT_TIMEOUT_MS;
+    Zotero.debug(`${label} using default timeout ${ZOTERO_FETCH_DEFAULT_TIMEOUT_MS}ms`);
+  }
 
   const wantsJSON = (() => {
     if (opts.responseType === 'json') return true;
@@ -330,13 +523,16 @@ async function zoteroFetch(doc, path, options) {
     return false;
   })();
 
-  const finalize = (status, raw, jsonCandidate) => {
-    if (wantsJSON) {
+  const buildResult = (status, raw, jsonCandidate, expectJSON) => {
+    const ok = status >= 200 && status < 300;
+    if (expectJSON) {
       const parsed = jsonCandidate !== undefined ? jsonCandidate : safeParseJSON(raw);
-      return { ok: status >= 200 && status < 300, status, data: parsed };
+      return { ok, status, data: parsed };
     }
-    return { ok: status >= 200 && status < 300, status, data: raw };
+    return { ok, status, data: raw };
   };
+
+  const expectJSONFromContentType = (contentType) => wantsJSON || isJSONContentType(contentType);
 
   // Preferred path: ZU.request (available in translator sandbox + connector)
   try {
@@ -356,12 +552,24 @@ async function zoteroFetch(doc, path, options) {
       const resp = await ZU.request(url, params);
       const status = resp && typeof resp.status === 'number' ? resp.status : 0;
       const raw = resp && (resp.responseText !== undefined ? resp.responseText : resp.body !== undefined ? resp.body : null);
-      const jsonCandidate = wantsJSON ? (resp && (resp.responseJSON !== undefined ? resp.responseJSON : safeParseJSON(raw))) : undefined;
-      let result = finalize(status, raw, jsonCandidate);
-      if (wantsJSON && (!result.data || typeof result.data !== 'object')) {
+      let contentType = null;
+      if (resp) {
+        if (typeof resp.getResponseHeader === 'function') {
+          contentType = resp.getResponseHeader('Content-Type') || contentType;
+        }
+        contentType = contentType || getHeaderValue(resp.headers, 'content-type');
+      }
+      const expectJSON = expectJSONFromContentType(contentType);
+      const jsonCandidate = expectJSON && resp && (resp.responseJSON !== undefined ? resp.responseJSON : safeParseJSON(raw));
+      let result = buildResult(status, raw, jsonCandidate, expectJSON);
+      if (expectJSON && (!result.data || typeof result.data !== 'object')) {
         const fallback = await fetchViaDefaultView(doc, url, method, headers, body, wantsJSON, `${label} (default-view fallback)`);
-        if (fallback && fallback.ok && fallback.parsed && typeof fallback.parsed === 'object') {
-          return finalize(fallback.status, fallback.raw, fallback.parsed);
+        if (fallback && fallback.ok) {
+          const fallbackExpectJSON = expectJSONFromContentType(fallback.contentType);
+          const fallbackResult = buildResult(fallback.status, fallback.raw, fallback.parsed, fallbackExpectJSON);
+          if (!fallbackExpectJSON || (fallbackResult.data && typeof fallbackResult.data === 'object')) {
+            return fallbackResult;
+          }
         }
       }
       return result;
@@ -387,11 +595,18 @@ async function zoteroFetch(doc, path, options) {
       const xhr = await Zotero.HTTP.request(method, url, httpOpts);
       const raw = xhr && typeof xhr.response === 'string' ? xhr.response : (xhr && xhr.responseText);
       const status = xhr && typeof xhr.status === 'number' ? xhr.status : 0;
-      let result = finalize(status, raw, undefined);
-      if (wantsJSON && (!result.data || typeof result.data !== 'object')) {
+      const contentType = xhr && typeof xhr.getResponseHeader === 'function'
+        ? xhr.getResponseHeader('Content-Type') : null;
+      const expectJSON = expectJSONFromContentType(contentType);
+      let result = buildResult(status, raw, undefined, expectJSON);
+      if (expectJSON && (!result.data || typeof result.data !== 'object')) {
         const fallback = await fetchViaDefaultView(doc, url, method, headers, body, wantsJSON, `${label} (default-view fallback)`);
-        if (fallback && fallback.ok && fallback.parsed && typeof fallback.parsed === 'object') {
-          return finalize(fallback.status, fallback.raw, fallback.parsed);
+        if (fallback && fallback.ok) {
+          const fallbackExpectJSON = expectJSONFromContentType(fallback.contentType);
+          const fallbackResult = buildResult(fallback.status, fallback.raw, fallback.parsed, fallbackExpectJSON);
+          if (!fallbackExpectJSON || (fallbackResult.data && typeof fallbackResult.data === 'object')) {
+            return fallbackResult;
+          }
         }
       }
       return result;
@@ -426,11 +641,18 @@ async function zoteroFetch(doc, path, options) {
     });
 
     const status = response.status || 0;
-    let result = finalize(status, response.responseText, undefined);
-    if (wantsJSON && (!result.data || typeof result.data !== 'object')) {
+    const contentType = typeof response.getResponseHeader === 'function'
+      ? response.getResponseHeader('Content-Type') : null;
+    const expectJSON = expectJSONFromContentType(contentType);
+    let result = buildResult(status, response.responseText, undefined, expectJSON);
+    if (expectJSON && (!result.data || typeof result.data !== 'object')) {
       const fallback = await fetchViaDefaultView(doc, url, method, headers, body, wantsJSON, `${label} (default-view fallback)`);
-      if (fallback && fallback.ok && fallback.parsed && typeof fallback.parsed === 'object') {
-        return finalize(fallback.status, fallback.raw, fallback.parsed);
+      if (fallback && fallback.ok) {
+        const fallbackExpectJSON = expectJSONFromContentType(fallback.contentType);
+        const fallbackResult = buildResult(fallback.status, fallback.raw, fallback.parsed, fallbackExpectJSON);
+        if (!fallbackExpectJSON || (fallbackResult.data && typeof fallbackResult.data === 'object')) {
+          return fallbackResult;
+        }
       }
     }
     return result;
@@ -470,8 +692,11 @@ async function fetchViaDefaultView(doc, url, method, headers, body, wantsJSON, l
     try {
       raw = await response.text();
     } catch (_) {}
-    const parsed = wantsJSON ? safeParseJSON(raw) : null;
-    return { ok: !!response.ok, status, raw, parsed };
+    const contentType = response.headers && typeof response.headers.get === 'function'
+      ? response.headers.get('content-type') : null;
+    const expectJSON = wantsJSON || isJSONContentType(contentType);
+    const parsed = expectJSON ? safeParseJSON(raw) : null;
+    return { ok: !!response.ok, status, raw, parsed, contentType };
   } catch (e) {
     Zotero.debug(`${label} default-view error: ${e && e.message}`);
     return null;
