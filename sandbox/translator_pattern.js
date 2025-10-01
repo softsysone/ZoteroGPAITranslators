@@ -103,17 +103,9 @@ function getItem(doc, url) {
 	// ZU.trimInternal, ZU.strToISO) for consistency.
 
 	// Attachments commonly include snapshots and PDFs.
-	item.attachments.push({
-		title: 'Snapshot',
-		mimeType: 'text/html',
-		document: doc
-	});
-	// Example PDF attachment:
-	// item.attachments.push({
-	// 	title: 'Full Text PDF',
-	// 	url: 'https://example.com/article.pdf',
-	// 	mimeType: 'application/pdf'
-	// });
+	for (let attachment of getAttachments(doc, url)) {
+		item.attachments.push(attachment);
+	}
 
 	// Optional: Collect tags, notes, or seeAlso references.
 
@@ -150,6 +142,21 @@ function getURL(doc, url) {
 function getExtra(doc, url) {
 	// TODO: Populate the extra field as needed.
 	return '';
+}
+
+function getAttachments(doc, url) {
+	// TODO: Return an array of attachment objects. For example:
+	return [{
+		title: 'Snapshot',
+		mimeType: 'text/html',
+		document: doc
+	}];
+	// Example PDF attachment:
+	// return [{
+	// 	title: 'Full Text PDF',
+	// 	url: 'https://example.com/article.pdf',
+	// 	mimeType: 'application/pdf'
+	// }];
 }
 
 /** BEGIN TEST CASES **/
