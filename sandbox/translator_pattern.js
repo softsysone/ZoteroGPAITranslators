@@ -68,25 +68,39 @@ function doWeb(doc, url) {
 	if (detectWeb(doc, url) == 'multiple') {
 		Zotero.selectItems(getSearchResults(doc, false), function (items) {
 			if (!items) return;
-			ZU.processDocuments(Object.keys(items), scrape);
+			ZU.processDocuments(Object.keys(items), getItem);
 		});
 	}
 	else {
-		scrape(doc, url);
+		getItem(doc, url);
 	}
 }
 
-// scrape handles data extraction for a single item page.
-function scrape(doc, url) {
+// getItem handles data extraction for a single item page.
+function getItem(doc, url) {
 	// Create the new Zotero item with the appropriate type (e.g., "journalArticle").
-	let item = new Zotero.Item('journalArticle');
+	let item = new Zotero.Item(getType(doc, url));
 
-	// TODO: Populate fields such as title, abstractNote, date, language, publicationTitle, etc.
-	// Use ZU utilities (e.g., ZU.xpathText, ZU.trimInternal, ZU.strToISO) for consistency.
-	item.title = ZU.trimInternal(text(doc, 'CSS SELECTOR FOR TITLE'));
+	// Populate core metadata by delegating to helper accessors.
+	item.title = getTitle(doc, url);
 
-	// Add creators using ZU.cleanAuthor for proper parsing.
-	// Example: item.creators.push(ZU.cleanAuthor('Author Name', 'author'));
+	// Add creators returned from getAuthors, which should yield an array of
+	// creator objects (e.g., via ZU.cleanAuthor).
+	for (let creator of getAuthors(doc, url)) {
+		item.creators.push(creator);
+	}
+
+	item.date = getDate(doc, url);
+	item.url = getURL(doc, url);
+
+	let extra = getExtra(doc, url);
+	if (extra) {
+		item.extra = extra;
+	}
+
+	// TODO: Populate additional fields such as abstractNote, language,
+	// publicationTitle, etc. Use ZU utilities (e.g., ZU.xpathText,
+	// ZU.trimInternal, ZU.strToISO) for consistency.
 
 	// Attachments commonly include snapshots and PDFs.
 	item.attachments.push({
@@ -104,6 +118,38 @@ function scrape(doc, url) {
 	// Optional: Collect tags, notes, or seeAlso references.
 
 	item.complete();
+}
+
+function getType(doc, url) {
+	// TODO: Inspect the document or URL to determine the correct Zotero item type.
+	return 'journalArticle';
+}
+
+function getTitle(doc, url) {
+	// TODO: Replace with a selector or extraction logic that returns the item title.
+	return ZU.trimInternal(text(doc, 'CSS SELECTOR FOR TITLE'));
+}
+
+function getAuthors(doc, url) {
+	// TODO: Extract author information and return an array of creator objects.
+	// Example implementation:
+	// return [ZU.cleanAuthor('Author Name', 'author')];
+	return [];
+}
+
+function getDate(doc, url) {
+	// TODO: Return an ISO-formatted date string when available.
+	return '';
+}
+
+function getURL(doc, url) {
+	// TODO: Return the canonical URL for the item.
+	return url;
+}
+
+function getExtra(doc, url) {
+	// TODO: Populate the extra field as needed.
+	return '';
 }
 
 /** BEGIN TEST CASES **/
