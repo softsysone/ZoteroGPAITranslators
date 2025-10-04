@@ -1,18 +1,4 @@
-{
-	"translatorID": "6a86b35c-f06f-4c3a-a014-f7c1117c4ede",
-	"label": "Gemini Chat",
-	"creator": "Jacob J. Walker",
-	"target": "^https?://gemini\\.google\\.com/(?:app(?:/c)?|share)/[A-Za-z0-9_-]",
-	"minVersion": "5.0",
-	"maxVersion": "",
-	"priority": 100,
-	"inRepository": true,
-	"translatorType": 4,
-	"browserSupport": "gcsibv",
-	"lastUpdated": "2025-10-04 03:50:04"
-}
-
-/* Gemini Chat translator — v0.4.55-alpha
+/* Gemini Chat translator — v0.5.1-beta
  *
  * # Vibe Coding Directives:
  * 
@@ -66,60 +52,7 @@
 
  *
 * Changelog
-* - v0.4.55-alpha: Reduce JSON parse logging to fallback-only details.
-* - v0.4.54-alpha: Trim verbose debug logging to key events.
-* - v0.4.53-alpha: Log raw conversation summary rows for metadata inspection.
-* - v0.4.52-alpha: Rename batch context helper to getAPIContext.
-* - v0.4.51-alpha: Rename batch helper to getAPIEndpoint.
-* - v0.4.50-alpha: Generalize batch execute endpoint helper name.
-* - v0.4.49-alpha: Rename MaZiqc batch URL helper for clarity.
-* - v0.4.48-alpha: Force MaZiqc limit handling to fixed 100 and drop override plumbing.
-* - v0.4.47-alpha: Request 100 MaZiqc summaries per page by default.
-* - v0.4.46-alpha: Drop unused DOM datetime fallback in getDate.
-* - v0.4.45-alpha: Simplify summary date reuse and API helper payload handling.
-* - v0.4.44-alpha: Rename API helpers to generic getAPI* naming.
-* - v0.4.43-alpha: Inline batch response parsing within getConversationSummary.
-* - v0.4.42-alpha: Fallback item title to MaZiqc summary metadata.
-* - v0.4.41-alpha: Inline default-view response reading inside callAPI.
-* - v0.4.40-alpha: Inline content-type lookup inside callAPI.
-* - v0.4.39-alpha: Inline datetime parsing directly in getDate.
-* - v0.4.38-alpha: Drop title-based summary matching in favor of CID-only lookup.
-* - v0.4.37-alpha: Inline timestamp conversion in conversation summary parsing.
-* - v0.4.36-alpha: Document getDate behavior with JSDoc.
-* - v0.4.35-alpha: Return a single matched summary via getConversationSummary.
-* - v0.4.34-alpha: Inline default-view fetch fallback directly inside callAPI.
-* - v0.4.33-alpha: Add JSDoc to URL, extra, and attachment helpers.
-* - v0.4.32-alpha: Rename MaZiqc helper to findConversationSummary.
-* - v0.4.31-alpha: Restore paginated MaZiqc attempts after summary refactor.
-* - v0.4.30-alpha: Streamline MaZiqc summary lookup and reduce helper bloat.
-* - v0.4.29-alpha: Inline conversation summary lookup into getDate.
-* - v0.4.28-alpha: Add JSDoc to core item helpers.
-* - v0.4.27-alpha: Trim emails and newlines from human author names.
-* - v0.4.26-alpha: Inline human author detection directly in getAuthors.
-* - v0.4.25-alpha: Rename DOM model helper and inline parsing logic.
-* - v0.4.24-alpha: Derive AI author name from document title.
-* - v0.4.23-alpha: Inline title helpers and update JSDoc.
-* - v0.4.22-alpha: Restore summary-based date fallback while keeping DOM title lookup.
-* - v0.4.21-alpha: Simplify title lookup to sidebar DOM only.
-* - v0.4.20-alpha: Derive titles via conversation ID with MaZiqc fallback.
-* - v0.4.19-alpha: Standardize ID helper naming to uppercase suffix.
-* - v0.4.18-alpha: Rename user ID helper to use last prompt terminology.
-* - v0.4.17-alpha: Reuse shared conversation ID lookup in date helpers.
-* - v0.4.16-alpha: Split ID helper logic for modular access.
-* - v0.4.15-alpha: Manual go through and commenting
-* - v0.4.14-alpha: Restore getModelFromDOM helper for clarity.
-* - v0.4.13-alpha: Remove unused XPath helpers folded back into callers.
-* - v0.4.12-alpha: Share response normalization inside callAPI transport loop.
-* - v0.4.11-alpha: Restore inline callAPI helpers for leaner transport loop.
-* - v0.4.10-alpha: Move callAPI helper logic to shared utilities.
-* - v0.4.9-alpha: Share callAPI response helpers across transports.
-* - v0.4.8-alpha: Consolidate callAPI transports under shared loop runner.
-* - v0.4.7-alpha: Restore callAPI promote helper after transport-loop refactor.
-* - v0.4.5-alpha: Simplify callAPI transport handling via shared helpers and iteration.
-* - v0.4.4-alpha: Refactor callAPI to iterate through transports with shared logic comments.
-* - v0.4.3-alpha: Expand callAPI options to support shared usage across translators.
-* - v0.4.2-alpha: Introduce shared callAPI networking across transports.
-* - v0.4.1-alpha: Inline the conversation-id regex and drop the redundant helper.
+* - v0.5.0-beta: Refactored into a cleaner release, emphasizing reduced complexity and leaner API/date handling.
 * - v0.4.0-beta: Can get major metadata via DOM and API (of sidebar) for both Scaffold and Chromium
  */
 
@@ -137,7 +70,7 @@ function detectWeb(doc, url) {
 }
 
 async function doWeb(doc, url) {
-  const VERSION = 'v0.4.55-alpha';
+  const VERSION = 'v0.5.1-beta';
   Zotero.debug(`Gemini Chat doWeb ${VERSION}`);
 
   await getItem(doc, url);
@@ -1710,8 +1643,3 @@ async function callAPI(doc, target, options) {
 
   return { ok: false, status: 0, data: null, raw: '', contentType: null };
 }
-
-/** BEGIN TEST CASES **/
-var testCases = [
-]
-/** END TEST CASES **/
